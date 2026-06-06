@@ -1,0 +1,40 @@
+; VComTunnel.Serial KMDF prototype INF skeleton.
+; This file is a scaffold and is not ready for installation.
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Ports
+ClassGuid={4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider=%ManufacturerName%
+CatalogFile=VComTunnel.Serial.cat
+DriverVer=06/06/2026,0.1.0.0
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceName%=VComTunnelSerial_Install, Root\VComTunnelSerial
+
+[VComTunnelSerial_Install]
+CopyFiles=DriverCopyFiles
+AddReg=VComTunnelSerial_AddReg
+
+[DriverCopyFiles]
+VComTunnel.Serial.sys
+
+[VComTunnelSerial_AddReg]
+HKR,,FriendlyName,,%DeviceName%
+
+[DestinationDirs]
+DriverCopyFiles=12
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+VComTunnel.Serial.sys=1
+
+[Strings]
+ManufacturerName="VComTunnel"
+DeviceName="VComTunnel Virtual Serial Port"
+DiskName="VComTunnel Serial Driver Disk"
