@@ -230,6 +230,10 @@ static void Rfc2217CommandEncoding()
     AssertBytes(
         [0xFF, 0xF1],
         Rfc2217Client.BuildTelnetNop());
+
+    AssertBytes(
+        [0xFF, 0xFA, 0x2C, 0x00, 0x56, 0x43, 0x6F, 0x6D, 0xFF, 0xF0],
+        Rfc2217Client.BuildSignature("VCom"));
 }
 
 static void Rfc2217TelnetParser()
@@ -251,6 +255,12 @@ static void Rfc2217TelnetParser()
     var suspend = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x6C, 0xFF, 0xF0], 6);
     AssertEqual(Rfc2217Client.FlowControlSuspend.ToString(), suspend.Notifications.Single().Command.ToString());
     AssertTrue(Rfc2217Client.IsFlowControlCommand(suspend.Notifications.Single().Command), "FLOWCONTROL-SUSPEND should be recognized.");
+
+    var signatureRequest = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x00, 0xFF, 0xF0], 6);
+    AssertEqual(Rfc2217Client.Signature.ToString(), signatureRequest.Notifications.Single().Command.ToString());
+    AssertBytes(
+        [0xFF, 0xFA, 0x2C, 0x00, 0x56, 0x43, 0x6F, 0x6D, 0x54, 0x75, 0x6E, 0x6E, 0x65, 0x6C, 0xFF, 0xF0],
+        signatureRequest.Replies);
 }
 
 static void Rfc2217AckSemantics()

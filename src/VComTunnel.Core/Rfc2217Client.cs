@@ -1,7 +1,10 @@
+using System.Text;
+
 namespace VComTunnel.Core;
 
 public sealed class Rfc2217Client
 {
+    public const byte Signature = 0;
     public const byte AckSetBaudRate = 101;
     public const byte AckSetDataSize = 102;
     public const byte AckSetParity = 103;
@@ -37,6 +40,7 @@ public sealed class Rfc2217Client
     private const byte PurgeData = 12;
     private const byte LineStateErrorMask = 0x1E;
     private const byte ModemStateMask = 0xFF;
+    private const string ClientSignature = "VComTunnel";
 
     private const uint SerialDtrHandshake = 0x02;
     private const uint SerialCtsHandshake = 0x08;
@@ -70,6 +74,11 @@ public sealed class Rfc2217Client
     public static byte[] BuildTelnetNop()
     {
         return [Iac, Nop];
+    }
+
+    public static byte[] BuildSignature(string signature)
+    {
+        return BuildSubnegotiation(Signature, Encoding.ASCII.GetBytes(signature));
     }
 
     public static Rfc2217ExpectedAck[] BuildInitialExpectedAcks()
@@ -141,7 +150,7 @@ public sealed class Rfc2217Client
                         }
                         else if (value == Se)
                         {
-                            ParseSubnegotiation(_subnegotiation, events);
+                            ParseSubnegotiation(_subnegotiation, replies, events);
                             _state = ParserState.Data;
                             _subState = SubnegotiationState.Data;
                         }
@@ -367,7 +376,7 @@ public sealed class Rfc2217Client
         }
     }
 
-    private static void ParseSubnegotiation(List<byte> data, List<Rfc2217Notification> events)
+    private static void ParseSubnegotiation(List<byte> data, List<byte> replies, List<Rfc2217Notification> events)
     {
         if (data.Count < 2 || data[0] != ComPortOption)
         {
@@ -376,6 +385,11 @@ public sealed class Rfc2217Client
 
         var command = data[1];
         var payload = data.Skip(2).ToArray();
+        if (command == Signature && payload.Length == 0)
+        {
+            replies.AddRange(BuildSignature(ClientSignature));
+        }
+
         events.Add(new Rfc2217Notification(command, payload));
     }
 
