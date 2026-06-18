@@ -33,7 +33,7 @@ try {
             visiblePort = 'COM12'
             backingPort = 'CNCB12'
             host = '127.0.0.1'
-            port = 3333
+            port = 5000
             protocol = 'rfc2217'
             autoStart = $false
             restartOnFailure = $false
@@ -45,7 +45,7 @@ try {
             visiblePort = 'COM22'
             backingPort = $null
             host = '127.0.0.1'
-            port = 3333
+            port = 5000
             protocol = 'rfc2217'
             autoStart = $false
             restartOnFailure = $false

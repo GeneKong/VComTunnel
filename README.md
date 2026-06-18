@@ -137,7 +137,7 @@ Each `com0comHub4com` mapping expects:
 The bridge process is launched through hub4com's wrapper:
 
 ```text
-com2tcp-rfc2217.bat \\.\CNCB12 192.168.1.50 3333
+com2tcp-rfc2217.bat \\.\CNCB12 192.168.1.50 5000
 ```
 
 This mirrors the known hub4com RFC2217 client pattern and keeps baud-rate and line-control negotiation inside the wrapper.

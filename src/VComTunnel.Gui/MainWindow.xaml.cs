@@ -330,7 +330,7 @@ public partial class MainWindow : Window
             VisiblePort = $"COM{portNumber}",
             BackingPort = $"CNCB{portNumber}",
             Host = "127.0.0.1",
-            Port = 3333,
+            Port = 5000,
             AutoStart = false,
             RestartOnFailure = true,
             StateLabel = GuiText.State(_language, TunnelRunState.Stopped)

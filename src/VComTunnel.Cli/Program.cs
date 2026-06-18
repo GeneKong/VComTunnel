@@ -87,7 +87,7 @@ internal static class VComTunnelCtl
                     VisiblePort = "COM12",
                     BackingPort = "CNCB12",
                     Host = "192.168.1.50",
-                    Port = 3333
+                    Port = 5000
                 }
             ]
         };

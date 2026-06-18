@@ -30,7 +30,7 @@ public sealed record TunnelMapping
     public string VisiblePort { get; init; } = "COM12";
     public string? BackingPort { get; init; } = "CNCB12";
     public string Host { get; init; } = "127.0.0.1";
-    public int Port { get; init; } = 3333;
+    public int Port { get; init; } = 5000;
     public TunnelProtocol Protocol { get; init; } = TunnelProtocol.Rfc2217;
     public bool AutoStart { get; init; }
     public bool RestartOnFailure { get; init; } = true;
