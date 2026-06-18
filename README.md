@@ -30,8 +30,9 @@ dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -
 ```
 
 Local smoke runs include control IOCTL probes for comm config, queue size,
-stats, baud-rate, line-control, raw modem control, handflow, BREAK, purge,
-XOFF/XON, immediate-char echo, and the RFC2217 frames emitted by those controls.
+stats, baud-rate, line-control, raw modem control, DTR/RTS reset-style pulses,
+CTS/RTS handflow, BREAK, purge, XOFF/XON, immediate-char echo, and the RFC2217
+frames emitted by those controls.
 The local fake server also injects RFC2217 modem/line-state notifications and
 checks that they appear through local serial status IOCTLs. The RFC2217 client
 requests full hub4com-style line/modem-state masks while tolerating ACKs for

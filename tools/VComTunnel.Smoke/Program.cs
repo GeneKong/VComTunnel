@@ -265,6 +265,98 @@ static async Task ProbeRfc2217EndpointAsync(SmokeOptions options, CancellationTo
             cancellationToken);
         DumpProbeExchange(rtsExchange);
 
+        var dtrOffExchange = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "DTR off",
+            Rfc2217Client.BuildSetModemControl(dtr: false, rts: null),
+            [new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [9])],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(dtrOffExchange);
+
+        var dtrRestoreExchange = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "DTR restore on",
+            Rfc2217Client.BuildSetModemControl(dtr: true, rts: null),
+            [new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [8])],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(dtrRestoreExchange);
+
+        var rtsOffExchange = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "RTS off",
+            Rfc2217Client.BuildSetModemControl(dtr: null, rts: false),
+            [new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [12])],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(rtsOffExchange);
+
+        var rtsRestoreExchange = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "RTS restore on",
+            Rfc2217Client.BuildSetModemControl(dtr: null, rts: true),
+            [new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [11])],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(rtsRestoreExchange);
+
+        var resetLowExchange = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "reset-style DTR/RTS low",
+            Rfc2217Client.BuildSetModemControl(dtr: false, rts: false),
+            [
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [9]),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [12])
+            ],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(resetLowExchange);
+
+        var resetRestoreExchange = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "reset-style DTR/RTS restore",
+            Rfc2217Client.BuildSetModemControl(dtr: true, rts: true),
+            [
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [8]),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [11])
+            ],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(resetRestoreExchange);
+
+        var ctsRtsFlowExchange = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "CTS outbound + RTS inbound flow",
+            Rfc2217Client.BuildSetHandflow(controlHandshake: 0x08, flowReplace: 0x80),
+            [
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [3]),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [16])
+            ],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(ctsRtsFlowExchange);
+
+        var noFlowExchange = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "restore no flow-control",
+            Rfc2217Client.BuildSetHandflow(controlHandshake: 0, flowReplace: 0),
+            [
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [1]),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [14])
+            ],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(noFlowExchange);
+
         var breakOnExchange = await ProbeRfc2217ExchangeAsync(
             stream,
             client,
@@ -548,7 +640,52 @@ static async Task<int> ExerciseControlIoctlsAsync(
         readTimeout,
         cancellationToken);
 
-    serial.SetHandflow(controlHandshake: 0x20, flowReplace: 0x80);
+    serial.ClearDtr();
+    await WaitForRfc2217Async(
+        probe,
+        notification => notification.Command == setControl && notification.Payload is [9],
+        "reset pulse DTR off",
+        readTimeout,
+        cancellationToken);
+    serial.ClearRts();
+    await WaitForRfc2217Async(
+        probe,
+        notification => notification.Command == setControl && notification.Payload is [12],
+        "reset pulse RTS off",
+        readTimeout,
+        cancellationToken);
+    serial.SetDtr();
+    await WaitForRfc2217Async(
+        probe,
+        notification => notification.Command == setControl && notification.Payload is [8],
+        "reset pulse DTR on",
+        readTimeout,
+        cancellationToken);
+    serial.SetRts();
+    await WaitForRfc2217Async(
+        probe,
+        notification => notification.Command == setControl && notification.Payload is [11],
+        "reset pulse RTS on",
+        readTimeout,
+        cancellationToken);
+    Console.WriteLine("reset pulse: DTR/RTS off -> on completed.");
+
+    serial.SetHandflow(controlHandshake: NativeSerial.SerialCtsHandshake, flowReplace: NativeSerial.SerialRtsHandshake);
+    await WaitForRfc2217Async(
+        probe,
+        notification => notification.Command == setControl && notification.Payload is [3],
+        "SET-CONTROL outbound CTS flow",
+        readTimeout,
+        cancellationToken);
+    await WaitForRfc2217Async(
+        probe,
+        notification => notification.Command == setControl && notification.Payload is [16],
+        "SET-CONTROL inbound RTS flow",
+        readTimeout,
+        cancellationToken);
+    Console.WriteLine("handflow: CTS outbound + RTS inbound completed.");
+
+    serial.SetHandflow(controlHandshake: NativeSerial.SerialDcdHandshake, flowReplace: NativeSerial.SerialRtsHandshake);
     await WaitForRfc2217Async(
         probe,
         notification => notification.Command == setControl && notification.Payload is [17],
@@ -561,6 +698,21 @@ static async Task<int> ExerciseControlIoctlsAsync(
         "SET-CONTROL inbound RTS flow",
         readTimeout,
         cancellationToken);
+
+    serial.SetHandflow(controlHandshake: 0, flowReplace: 0);
+    await WaitForRfc2217Async(
+        probe,
+        notification => notification.Command == setControl && notification.Payload is [1],
+        "SET-CONTROL outbound no flow",
+        readTimeout,
+        cancellationToken);
+    await WaitForRfc2217Async(
+        probe,
+        notification => notification.Command == setControl && notification.Payload is [14],
+        "SET-CONTROL inbound no flow",
+        readTimeout,
+        cancellationToken);
+    Console.WriteLine("handflow: restored no flow-control.");
 
     serial.SetBreak(enabled: true);
     await WaitForRfc2217Async(
@@ -761,6 +913,9 @@ internal sealed class NativeSerial : IDisposable
     public const uint RtsState = 0x00000002;
     public const uint PurgeTxClear = 0x00000004;
     public const uint PurgeRxClear = 0x00000008;
+    public const uint SerialCtsHandshake = 0x00000008;
+    public const uint SerialDcdHandshake = 0x00000020;
+    public const uint SerialRtsHandshake = 0x00000080;
     public const uint ExpectedRemoteModemStatus = 0x000000F0;
     public const uint ExpectedRemoteLineErrors = 0x00000017;
 

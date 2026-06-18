@@ -230,6 +230,13 @@ static void Rfc2217CommandEncoding()
         Rfc2217Client.BuildSetHandflow(controlHandshake: 0x22, flowReplace: 0));
 
     AssertBytes(
+        [
+            0xFF, 0xFA, 0x2C, 0x05, 0x03, 0xFF, 0xF0,
+            0xFF, 0xFA, 0x2C, 0x05, 0x10, 0xFF, 0xF0
+        ],
+        Rfc2217Client.BuildSetHandflow(controlHandshake: 0x08, flowReplace: 0x80));
+
+    AssertBytes(
         [0x56, 0xFF, 0xFF, 0x43],
         Rfc2217Client.EscapeSerialData([0x56, 0xFF, 0x43], 0, 3));
 
