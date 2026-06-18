@@ -43,6 +43,7 @@
               BorderThickness="0,0,0,1">
             <MenuItem x:Name="ServiceMenuItem" Header="Service">
                 <MenuItem x:Name="RefreshMenuItem" Header="Refresh" Click="Refresh_Click"/>
+                <MenuItem x:Name="RestartServiceMenuItem" Header="Restart service" Click="RestartService_Click"/>
             </MenuItem>
             <MenuItem x:Name="MappingsMenuItem" Header="Mappings">
                 <MenuItem x:Name="AddMenuItem" Header="Add" Click="Add_Click"/>
@@ -83,6 +84,9 @@
                 <Button x:Name="RefreshButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"
                         Click="Refresh_Click"/>
+                <Button x:Name="RestartServiceButton"
+                        Style="{StaticResource ToolBarIconButtonStyle}"
+                        Click="RestartService_Click"/>
                 <Border Style="{StaticResource ToolBarSeparatorStyle}"/>
                 <Button x:Name="AddButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"

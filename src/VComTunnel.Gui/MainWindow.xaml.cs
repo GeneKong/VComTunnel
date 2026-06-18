@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     private readonly List<string> _guiLogLines = [];
     private bool _serviceStartAttempted;
     private bool _dependencyPollActive;
+    private bool _serviceRestarting;
     private bool _updatingLanguage;
     private bool _updatingSelection;
     private bool _savingMappings;
@@ -79,6 +80,7 @@ public partial class MainWindow : Window
         StatusLabel.Text = T("Label.Status");
 
         SetToolbarButton(RefreshButton, PackIconMaterialKind.Refresh, "Action.Refresh");
+        SetToolbarButton(RestartServiceButton, PackIconMaterialKind.Restart, "Action.RestartService");
         SetToolbarButton(AddButton, PackIconMaterialKind.Plus, "Action.Add");
         SetToolbarButton(DeleteMappingButton, PackIconMaterialKind.DeleteOutline, "Action.DeleteMapping");
         SetToolbarButton(StartButton, PackIconMaterialKind.Play, "Action.Start");
@@ -87,6 +89,7 @@ public partial class MainWindow : Window
         SetToolbarButton(ClearLogsButton, PackIconMaterialKind.Broom, "Action.ClearLogs");
 
         SetCommandMenuItem(RefreshMenuItem, PackIconMaterialKind.Refresh, "Action.Refresh");
+        SetCommandMenuItem(RestartServiceMenuItem, PackIconMaterialKind.Restart, "Action.RestartService");
         SetCommandMenuItem(AddMenuItem, PackIconMaterialKind.Plus, "Action.Add");
         SetCommandMenuItem(SaveMenuItem, PackIconMaterialKind.ContentSave, "Action.Save");
         SetCommandMenuItem(DeleteMappingMenuItem, PackIconMaterialKind.DeleteOutline, "Action.DeleteMapping");
@@ -166,6 +169,8 @@ public partial class MainWindow : Window
         _serviceStartAttempted = false;
         await RefreshAsync();
     }
+
+    private async void RestartService_Click(object sender, RoutedEventArgs e) => await RestartServiceAsync();
 
     private async void SetupDeps_Click(object sender, RoutedEventArgs e) => await SetupDependenciesAsync();
     private async void Save_Click(object sender, RoutedEventArgs e) => await SaveAsync();
@@ -420,6 +425,55 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task RestartServiceAsync()
+    {
+        if (_serviceRestarting)
+        {
+            return;
+        }
+
+        _serviceRestarting = true;
+        try
+        {
+            _serviceStartAttempted = false;
+            SetStatus(T("Status.ServiceRestarting"));
+
+            var serviceWasReady = await IsServiceReadyAsync();
+            var installedServiceKnown = await TryStopInstalledWindowsServiceAsync();
+            if ((serviceWasReady || installedServiceKnown) && await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(10)))
+            {
+                AppendGuiLog("info", T("Log.Gui"), T("Status.ServiceStopped"));
+            }
+
+            if (await IsServiceReadyAsync())
+            {
+                var stoppedLocalProcess = StopLocalServiceProcesses();
+                if (stoppedLocalProcess)
+                {
+                    await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(6));
+                }
+            }
+
+            if (await IsServiceReadyAsync())
+            {
+                SetStatus(T("Status.ServiceStopNotConfirmed"), "warn");
+                await RefreshAsync();
+                return;
+            }
+
+            _serviceStartAttempted = false;
+            await StartServiceAndRefreshAsync(force: true);
+            if (await IsServiceReadyAsync())
+            {
+                SetStatus(T("Status.ServiceRestarted"));
+            }
+        }
+        finally
+        {
+            _serviceRestarting = false;
+        }
+    }
+
     private async Task StartServiceAndRefreshAsync(bool force)
     {
         if (_serviceStartAttempted && !force)
@@ -510,6 +564,36 @@ public partial class MainWindow : Window
         return await WaitForServiceAsync(TimeSpan.FromSeconds(10));
     }
 
+    private async Task<bool> TryStopInstalledWindowsServiceAsync()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        var query = await RunProcessAsync("sc.exe", ["query", "VComTunnel"]);
+        if (query.ExitCode != 0)
+        {
+            return false;
+        }
+
+        if (query.Output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        ServiceStateText.Text = T("Status.ServiceStopping");
+        var stop = await RunProcessAsync("sc.exe", ["stop", "VComTunnel"]);
+        if (stop.ExitCode != 0
+            && !stop.Output.Contains("STOP_PENDING", StringComparison.OrdinalIgnoreCase)
+            && !stop.Output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendGuiLog("warn", T("Log.Gui"), TF("Status.ServiceStopFailed", CollapseWhitespace(stop.Output + " " + stop.Error)));
+        }
+
+        return true;
+    }
+
     private static async Task<ProcessRunResult> RunProcessAsync(string fileName, IReadOnlyList<string> arguments)
     {
         var startInfo = new ProcessStartInfo
@@ -552,6 +636,76 @@ public partial class MainWindow : Window
         }
 
         return false;
+    }
+
+    private async Task<bool> WaitForServiceOfflineAsync(TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (!await IsServiceReadyAsync())
+            {
+                return true;
+            }
+
+            await Task.Delay(500);
+        }
+
+        return !await IsServiceReadyAsync();
+    }
+
+    private bool StopLocalServiceProcesses()
+    {
+        var stoppedAny = false;
+        var servicePath = ResolveServicePath();
+        foreach (var process in Process.GetProcessesByName("VComTunnel.Service"))
+        {
+            using (process)
+            {
+                if (process.Id == Environment.ProcessId || !IsExpectedServiceProcess(process, servicePath))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ServiceStateText.Text = T("Status.ServiceStopping");
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(5000);
+                    stoppedAny = true;
+                    AppendGuiLog("info", T("Log.Gui"), TF("Status.ServiceProcessStopped", process.Id));
+                }
+                catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+                {
+                    AppendGuiLog("warn", T("Log.Gui"), TF("Status.ServiceProcessStopFailed", process.Id, ex.Message));
+                }
+            }
+        }
+
+        return stoppedAny;
+    }
+
+    private static bool IsExpectedServiceProcess(Process process, string? servicePath)
+    {
+        if (servicePath is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            var processPath = process.MainModule?.FileName;
+            return string.IsNullOrWhiteSpace(processPath)
+                || string.Equals(Path.GetFullPath(processPath), Path.GetFullPath(servicePath), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Win32Exception)
+        {
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private async Task RefreshMappingStatesAsync()
