@@ -28,7 +28,6 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<MappingRow> _mappings = [];
     private readonly ObservableCollection<ComPairRow> _comPairs = [];
     private readonly List<string> _guiLogLines = [];
-    private Process? _ownedServiceProcess;
     private bool _serviceStartAttempted;
     private bool _dependencyPollActive;
     private bool _updatingLanguage;
@@ -51,7 +50,6 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
-        StopOwnedServiceProcess();
         _autoSaveCts?.Cancel();
         _autoSaveCts?.Dispose();
         _client.Dispose();
@@ -436,6 +434,13 @@ public partial class MainWindow : Window
         _serviceStartAttempted = true;
         ServiceStateText.Text = T("Status.ServiceStarting");
 
+        if (await TryStartInstalledWindowsServiceAsync())
+        {
+            await RefreshAsync();
+            SetStatus(T("Status.BackgroundServiceReady"));
+            return;
+        }
+
         var servicePath = ResolveServicePath();
         if (servicePath is null)
         {
@@ -448,25 +453,14 @@ public partial class MainWindow : Window
 
         try
         {
-            Directory.CreateDirectory(AppPaths.LogsDirectory);
-            var logPath = Path.Combine(AppPaths.LogsDirectory, "gui-started-service.log");
-            _ownedServiceProcess = Process.Start(new ProcessStartInfo
+            using var _ = Process.Start(new ProcessStartInfo
             {
                 FileName = servicePath,
                 ArgumentList = { "--console" },
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
                 WorkingDirectory = Path.GetDirectoryName(servicePath)!
             });
-            if (_ownedServiceProcess is not null)
-            {
-                _ownedServiceProcess.OutputDataReceived += (_, e) => AppendServiceStartLog(logPath, e.Data);
-                _ownedServiceProcess.ErrorDataReceived += (_, e) => AppendServiceStartLog(logPath, e.Data);
-                _ownedServiceProcess.BeginOutputReadLine();
-                _ownedServiceProcess.BeginErrorReadLine();
-            }
         }
         catch (Exception ex)
         {
@@ -479,14 +473,69 @@ public partial class MainWindow : Window
         if (await WaitForServiceAsync(TimeSpan.FromSeconds(10)))
         {
             await RefreshAsync();
+            SetStatus(T("Status.BackgroundServiceReady"));
             return;
         }
 
         ServiceStateText.Text = T("Status.ServiceOffline");
         ClearComPairsList();
         DependenciesText.Text = TF("Diag.StartedButNotReady", servicePath);
-        DependenciesText.Text += Environment.NewLine + TF("Diag.StartupLog", Path.Combine(AppPaths.LogsDirectory, "gui-started-service.log"));
         DependenciesText.Text += Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+    }
+
+    private async Task<bool> TryStartInstalledWindowsServiceAsync()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        var query = await RunProcessAsync("sc.exe", ["query", "VComTunnel"]);
+        if (query.ExitCode != 0)
+        {
+            return false;
+        }
+
+        if (!query.Output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
+        {
+            ServiceStateText.Text = T("Status.WindowsServiceStarting");
+            var start = await RunProcessAsync("sc.exe", ["start", "VComTunnel"]);
+            if (start.ExitCode != 0 && !start.Output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
+            {
+                AppendGuiLog("warn", T("Log.Gui"), CollapseWhitespace(start.Output + " " + start.Error));
+                return false;
+            }
+        }
+
+        return await WaitForServiceAsync(TimeSpan.FromSeconds(10));
+    }
+
+    private static async Task<ProcessRunResult> RunProcessAsync(string fileName, IReadOnlyList<string> arguments)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo);
+        if (process is null)
+        {
+            return new ProcessRunResult(1, "", $"Could not start {fileName}.");
+        }
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        return new ProcessRunResult(process.ExitCode, await outputTask, await errorTask);
     }
 
     private async Task<bool> WaitForServiceAsync(TimeSpan timeout)
@@ -550,42 +599,6 @@ public partial class MainWindow : Window
     private string BuildOfflineMessage(Exception ex)
     {
         return TF("Diag.Offline", ex.Message);
-    }
-
-    private static void AppendServiceStartLog(string logPath, string? line)
-    {
-        if (line is null)
-        {
-            return;
-        }
-
-        try
-        {
-            File.AppendAllText(logPath, $"{DateTimeOffset.Now:O} {line}{Environment.NewLine}");
-        }
-        catch
-        {
-        }
-    }
-
-    private void StopOwnedServiceProcess()
-    {
-        try
-        {
-            if (_ownedServiceProcess is { HasExited: false })
-            {
-                _ownedServiceProcess.Kill(entireProcessTree: true);
-                _ownedServiceProcess.WaitForExit(3000);
-            }
-        }
-        catch
-        {
-        }
-        finally
-        {
-            _ownedServiceProcess?.Dispose();
-            _ownedServiceProcess = null;
-        }
     }
 
     private async Task SaveAsync()
@@ -2020,6 +2033,8 @@ internal sealed record KmdfCtlLaunch(string ResultFile);
 internal sealed record KmdfCtlResult(bool Success, string Message);
 
 internal sealed record KmdfWaitResult(bool Success, string? FailureMessage);
+
+internal sealed record ProcessRunResult(int ExitCode, string Output, string Error);
 
 internal sealed record MappingPortTarget(Com0comPairInfo? Com0comPair, KmdfDeviceInfo? KmdfDevice, string Description)
 {

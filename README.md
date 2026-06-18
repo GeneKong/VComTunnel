@@ -71,6 +71,13 @@ For published builds, pass the explicit service executable if auto-discovery doe
 vcomtunnelctl service install C:\Tools\VComTunnel\VComTunnel.Service.exe
 ```
 
+The GUI is only a controller. When it needs the local API, it first connects to
+an installed `VComTunnel` Windows service; if that is not installed, it starts
+`VComTunnel.Service.exe --console` as a hidden background process. Closing the
+GUI does not stop running tunnels. Use the GUI Stop action or `vcomtunnelctl
+stop <mappingId>` to stop a tunnel, and `vcomtunnelctl service stop` when using
+an installed Windows service.
+
 ## Phase 1 dependency model
 
 Published VComTunnel packages include the upstream `com0com` and `hub4com`
