@@ -93,6 +93,9 @@ Current implementation note:
   their ACKs before the mapping is reported as running. Accepted mask ACKs may
   be subsets of the requested masks, matching hub4com/RFC2217 server behavior.
 - RFC2217 SIGNATURE requests are answered with the VComTunnel client signature.
+- Known RFC2217 subnegotiations are validated for their expected payload length
+  before service-side handling; malformed known commands are ignored and any
+  pending ACK wait follows the existing timeout/retry policy.
 - RFC2217 FLOWCONTROL-SUSPEND pauses outbound serial data and control commands
   until FLOWCONTROL-RESUME is received.
 - TCP writes are serialized across driver events, Telnet negotiation replies,

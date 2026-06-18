@@ -456,7 +456,32 @@ public sealed class Rfc2217Client
             replies.AddRange(BuildSignature(ClientSignature));
         }
 
+        if (!IsValidKnownSubnegotiation(command, payload.Length))
+        {
+            return;
+        }
+
         events.Add(new Rfc2217Notification(command, payload));
+    }
+
+    private static bool IsValidKnownSubnegotiation(byte command, int payloadLength)
+    {
+        return command switch
+        {
+            Signature => true,
+            AckSetBaudRate => payloadLength == 4,
+            AckSetDataSize
+                or AckSetParity
+                or AckSetStopSize
+                or AckSetControl
+                or NotifyLineState
+                or NotifyModemState
+                or AckSetLineStateMask
+                or AckSetModemStateMask
+                or AckPurgeData => payloadLength == 1,
+            FlowControlSuspend or FlowControlResume => payloadLength == 0,
+            _ => true
+        };
     }
 
     private static byte[] Combine(params byte[][] frames)

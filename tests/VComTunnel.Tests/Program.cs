@@ -268,6 +268,15 @@ static void Rfc2217TelnetParser()
     AssertBytes(
         [0xFF, 0xFA, 0x2C, 0x00, 0x56, 0x43, 0x6F, 0x6D, 0x54, 0x75, 0x6E, 0x6E, 0x65, 0x6C, 0xFF, 0xF0],
         signatureRequest.Replies);
+
+    var malformedNotify = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x6B, 0xB0, 0x00, 0xFF, 0xF0], 8);
+    AssertEqual("0", malformedNotify.Notifications.Count.ToString());
+
+    var malformedSuspend = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x6C, 0x00, 0xFF, 0xF0], 7);
+    AssertEqual("0", malformedSuspend.Notifications.Count.ToString());
+
+    var malformedBaudAck = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x65, 0x00, 0xFF, 0xF0], 7);
+    AssertEqual("0", malformedBaudAck.Notifications.Count.ToString());
 }
 
 static void Rfc2217AckSemantics()
