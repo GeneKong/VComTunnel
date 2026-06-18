@@ -225,9 +225,9 @@
                         </ListView.ContextMenu>
                         <ListView.View>
                             <GridView>
-                                <GridViewColumn x:Name="PairNumberColumn" Header="#" DisplayMemberBinding="{Binding PairNumber}" Width="42"/>
-                                <GridViewColumn x:Name="PairPortAColumn" Header="Port A" DisplayMemberBinding="{Binding PortA}" Width="80"/>
-                                <GridViewColumn x:Name="PairPortBColumn" Header="Port B" DisplayMemberBinding="{Binding PortB}" Width="80"/>
+                                <GridViewColumn x:Name="PairNumberColumn" Header="Type" DisplayMemberBinding="{Binding Kind}" Width="72"/>
+                                <GridViewColumn x:Name="PairPortAColumn" Header="Port" DisplayMemberBinding="{Binding Port}" Width="86"/>
+                                <GridViewColumn x:Name="PairPortBColumn" Header="Details" DisplayMemberBinding="{Binding Details}" Width="160"/>
                                 <GridViewColumn x:Name="PairStateColumn" Header="State" DisplayMemberBinding="{Binding State}" Width="72"/>
                             </GridView>
                         </ListView.View>

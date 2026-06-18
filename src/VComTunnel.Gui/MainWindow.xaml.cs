@@ -113,13 +113,13 @@ public partial class MainWindow : Window
         AutoColumn.Header = T("Column.Auto");
         RestartColumn.Header = T("Column.Restart");
         MappingStateColumn.Header = T("Column.State");
-        PairNumberColumn.Header = T("Column.PairNumber");
+        PairNumberColumn.Header = T("Column.PortType");
         PairPortAColumn.Header = T("Column.PortA");
         PairPortBColumn.Header = T("Column.PortB");
         PairStateColumn.Header = T("Column.State");
 
         RefreshMappingStateLabels();
-        SetComPairs(_comPairs.Select(pair => pair.ToInfo()).ToList());
+        RefreshComPortRowLabels();
         SetLanguageMenuSelection();
         UpdateMappingCommandState();
     }
@@ -203,6 +203,12 @@ public partial class MainWindow : Window
         if (ComPairsList.SelectedItem is not ComPairRow row)
         {
             SetStatus(T("Status.SelectPairFirst"), "warn");
+            return;
+        }
+
+        if (row.IsKmdf)
+        {
+            await DeleteKmdfPortAsync(row.ToKmdfDeviceInfo());
             return;
         }
 
@@ -781,7 +787,7 @@ public partial class MainWindow : Window
 
             CommitGridEdits();
             var pairs = await _client.GetFromJsonAsync<List<Com0comPairInfo>>("/api/com0com/pairs", JsonOptions) ?? [];
-            SetComPairs(pairs);
+            SetComPorts(pairs, await GetKmdfDevicesAsync());
             var pair = pairs.FirstOrDefault(p => PairMatchesMapping(p, row));
             if (pair is null)
             {
@@ -957,6 +963,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        await DeleteKmdfPortAsync(device);
+    }
+
+    private async Task DeleteKmdfPortAsync(KmdfDeviceInfo device)
+    {
         var answer = MessageBox.Show(
             TF("Prompt.DeleteKmdfPort", device.PortName, device.InstanceId),
             T("Title.KmdfPort"),
@@ -1130,10 +1141,11 @@ public partial class MainWindow : Window
     private async Task<IReadOnlyList<Com0comPairInfo>> RefreshComPairsListAsync(bool updateDetails)
     {
         var pairs = await _client.GetFromJsonAsync<List<Com0comPairInfo>>("/api/com0com/pairs", JsonOptions) ?? [];
-        SetComPairs(pairs);
+        var devices = await GetKmdfDevicesAsync();
+        SetComPorts(pairs, devices);
         if (updateDetails)
         {
-            DependenciesText.Text = FormatComPortInventory(pairs, await GetKmdfDevicesAsync());
+            DependenciesText.Text = FormatComPortInventory(pairs, devices);
         }
 
         return pairs;
@@ -1155,16 +1167,29 @@ public partial class MainWindow : Window
         return new KmdfDeviceManager().GetDevices();
     }
 
-    private void SetComPairs(IReadOnlyList<Com0comPairInfo> pairs)
+    private void SetComPorts(IReadOnlyList<Com0comPairInfo> pairs, IReadOnlyList<KmdfDeviceInfo> devices)
     {
         _comPairs.Clear();
         foreach (var pair in pairs)
         {
             _comPairs.Add(ComPairRow.From(pair, _language));
         }
+
+        foreach (var device in devices)
+        {
+            _comPairs.Add(ComPairRow.From(device));
+        }
     }
 
     private void ClearComPairsList() => _comPairs.Clear();
+
+    private void RefreshComPortRowLabels()
+    {
+        foreach (var row in _comPairs)
+        {
+            row.RefreshLabels(_language);
+        }
+    }
 
     private void CommitGridEdits()
     {
@@ -1642,30 +1667,68 @@ public sealed class MappingRow
 
 public sealed class ComPairRow
 {
+    public string Kind { get; set; } = "";
+    public string Port { get; set; } = "";
+    public string Details { get; set; } = "";
     public int PairNumber { get; set; }
     public string? PortA { get; set; }
     public string? PortB { get; set; }
     public string? DeviceA { get; set; }
     public string? DeviceB { get; set; }
+    public string? InstanceId { get; set; }
+    public string? DriverName { get; set; }
     public bool IsComplete { get; set; }
+    public bool IsKmdf { get; set; }
     public string State { get; set; } = "";
 
     public static ComPairRow From(Com0comPairInfo pair, UiLanguage language)
     {
-        return new ComPairRow
+        var row = new ComPairRow
         {
+            Kind = "com0com",
+            Port = $"{pair.PortA ?? ""} <-> {pair.PortB ?? ""}".Trim(),
+            Details = $"pair {pair.PairNumber}",
             PairNumber = pair.PairNumber,
             PortA = pair.PortA,
             PortB = pair.PortB,
             DeviceA = pair.DeviceA,
             DeviceB = pair.DeviceB,
-            IsComplete = pair.IsComplete,
-            State = pair.IsComplete ? GuiText.Get(language, "Diag.Found") : GuiText.Get(language, "Diag.Partial")
+            IsComplete = pair.IsComplete
         };
+        row.RefreshLabels(language);
+        return row;
+    }
+
+    public static ComPairRow From(KmdfDeviceInfo device)
+    {
+        return new ComPairRow
+        {
+            Kind = "kmdf",
+            Port = device.PortName,
+            Details = device.DriverName ?? device.InstanceId,
+            InstanceId = device.InstanceId,
+            DriverName = device.DriverName,
+            IsComplete = device.IsStarted,
+            IsKmdf = true,
+            State = device.Status
+        };
+    }
+
+    public void RefreshLabels(UiLanguage language)
+    {
+        if (!IsKmdf)
+        {
+            State = IsComplete ? GuiText.Get(language, "Diag.Found") : GuiText.Get(language, "Diag.Partial");
+        }
     }
 
     public Com0comPairInfo ToInfo()
     {
         return new Com0comPairInfo(PairNumber, PortA, PortB, DeviceA, DeviceB, IsComplete);
+    }
+
+    public KmdfDeviceInfo ToKmdfDeviceInfo()
+    {
+        return new KmdfDeviceInfo(Port, InstanceId ?? "", State, DriverName, null, IsComplete);
     }
 }
