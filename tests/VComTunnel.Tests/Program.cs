@@ -349,12 +349,35 @@ static void Rfc2217TelnetParser()
 
     AssertBytes([0x41, 0xFF, 0x42], frame.SerialData);
     AssertBytes([0xFF, 0xFD, 0x2C], frame.Replies);
+    AssertEqual("1", frame.TelnetOptions.Count.ToString());
+    AssertEqual(Rfc2217Client.TelnetCommandWill.ToString(), frame.TelnetOptions.Single().Command.ToString());
+    AssertEqual(Rfc2217Client.TelnetOptionComPortControl.ToString(), frame.TelnetOptions.Single().Option.ToString());
+    AssertTrue(frame.TelnetOptions.Single().Accepted, "WILL COM-PORT-OPTION should be accepted.");
 
-    var closeNegotiation = client.ProcessNetworkBytes([0xFF, 0xFE, 0x2C, 0xFF, 0xFC, 0x2C], 6);
+    var closeClient = new Rfc2217Client();
+    _ = closeClient.ProcessNetworkBytes([0xFF, 0xFB, 0x2C, 0xFF, 0xFD, 0x2C], 6);
+    var closeNegotiation = closeClient.ProcessNetworkBytes([0xFF, 0xFE, 0x2C, 0xFF, 0xFC, 0x2C], 6);
     AssertBytes([0xFF, 0xFC, 0x2C, 0xFF, 0xFE, 0x2C], closeNegotiation.Replies);
+    AssertEqual("2", closeNegotiation.TelnetOptions.Count.ToString());
+    AssertTrue(closeNegotiation.TelnetOptions.All(option => option.Rejected), "DONT/WONT COM-PORT-OPTION should be reported as rejection.");
+    AssertEqual("DONT COM-PORT-OPTION rejected", closeNegotiation.TelnetOptions[0].Describe());
 
     var unsupportedNegotiation = client.ProcessNetworkBytes([0xFF, 0xFD, 0x55, 0xFF, 0xFB, 0x55], 6);
     AssertBytes([0xFF, 0xFC, 0x55, 0xFF, 0xFE, 0x55], unsupportedNegotiation.Replies);
+    AssertEqual("2", unsupportedNegotiation.TelnetOptions.Count.ToString());
+    AssertTrue(unsupportedNegotiation.TelnetOptions.All(option => option.Rejected), "Unsupported Telnet options should be reported as rejected.");
+
+    var repeatClient = new Rfc2217Client();
+    AssertBytes([0xFF, 0xFD, 0x2C], repeatClient.ProcessNetworkBytes([0xFF, 0xFB, 0x2C], 3).Replies);
+    AssertBytes([], repeatClient.ProcessNetworkBytes([0xFF, 0xFB, 0x2C], 3).Replies);
+    AssertBytes([0xFF, 0xFB, 0x2C], repeatClient.ProcessNetworkBytes([0xFF, 0xFD, 0x2C], 3).Replies);
+    AssertBytes([], repeatClient.ProcessNetworkBytes([0xFF, 0xFD, 0x2C], 3).Replies);
+
+    var initialClient = new Rfc2217Client();
+    _ = initialClient.BuildInitialNegotiation();
+    var initialReply = initialClient.ProcessNetworkBytes([0xFF, 0xFD, 0x2C, 0xFF, 0xFB, 0x2C], 6);
+    AssertBytes([], initialReply.Replies);
+    AssertTrue(initialReply.TelnetOptions.All(option => option.Accepted), "Initial negotiation replies should be accepted without producing a Telnet loop.");
 
     var notify = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x6B, 0xB0, 0xFF, 0xF0], 7);
     AssertEqual("0", notify.SerialData.Length.ToString());

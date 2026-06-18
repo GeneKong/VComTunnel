@@ -309,6 +309,7 @@ static async Task<Rfc2217ProbeExchange> ProbeRfc2217ExchangeAsync(
     var receivedBytes = 0;
     var replyBytes = 0;
     var serialBytes = 0;
+    var telnetOptions = new List<Rfc2217TelnetOptionEvent>();
 
     await stream.WriteAsync(request, cancellationToken);
     await stream.FlushAsync(cancellationToken);
@@ -343,6 +344,7 @@ static async Task<Rfc2217ProbeExchange> ProbeRfc2217ExchangeAsync(
         receivedBytes += read;
         var frame = client.ProcessNetworkBytes(buffer, read);
         serialBytes += frame.SerialData.Length;
+        telnetOptions.AddRange(frame.TelnetOptions);
 
         if (frame.Replies.Length > 0)
         {
@@ -378,7 +380,7 @@ static async Task<Rfc2217ProbeExchange> ProbeRfc2217ExchangeAsync(
         }
     }
 
-    return new Rfc2217ProbeExchange(description, request.Length, receivedBytes, replyBytes, serialBytes, notifications, pendingAcks);
+    return new Rfc2217ProbeExchange(description, request.Length, receivedBytes, replyBytes, serialBytes, notifications, pendingAcks, telnetOptions);
 }
 
 static bool ProbeAckMatches(Rfc2217ExpectedAck expected, Rfc2217Notification notification)
@@ -411,6 +413,14 @@ static void DumpProbeExchange(Rfc2217ProbeExchange exchange)
         foreach (var ack in exchange.MissingAcks)
         {
             Console.WriteLine($"    {ack.Describe()}");
+        }
+    }
+    if (exchange.TelnetOptions.Count > 0)
+    {
+        Console.WriteLine("  telnet options:");
+        foreach (var option in exchange.TelnetOptions)
+        {
+            Console.WriteLine($"    {option.Describe()}");
         }
     }
 }
@@ -667,7 +677,8 @@ internal sealed record Rfc2217ProbeExchange(
     int TelnetReplyBytes,
     int SerialBytes,
     IReadOnlyList<Rfc2217Notification> Notifications,
-    IReadOnlyList<Rfc2217ExpectedAck> MissingAcks);
+    IReadOnlyList<Rfc2217ExpectedAck> MissingAcks,
+    IReadOnlyList<Rfc2217TelnetOptionEvent> TelnetOptions);
 
 internal sealed record SerialStats(
     uint ReceivedCount,

@@ -21,16 +21,24 @@ public sealed class Rfc2217Client
     public const byte AckPurgeData = 112;
 
     private const byte Iac = 255;
-    private const byte Dont = 254;
-    private const byte Do = 253;
-    private const byte Wont = 252;
-    private const byte Will = 251;
+    public const byte TelnetCommandDont = 254;
+    public const byte TelnetCommandDo = 253;
+    public const byte TelnetCommandWont = 252;
+    public const byte TelnetCommandWill = 251;
+    public const byte TelnetOptionBinary = 0;
+    public const byte TelnetOptionSuppressGoAhead = 3;
+    public const byte TelnetOptionComPortControl = 44;
+
+    private const byte Dont = TelnetCommandDont;
+    private const byte Do = TelnetCommandDo;
+    private const byte Wont = TelnetCommandWont;
+    private const byte Will = TelnetCommandWill;
     private const byte Sb = 250;
     private const byte Nop = 241;
     private const byte Se = 240;
-    private const byte TelnetBinary = 0;
-    private const byte SuppressGoAhead = 3;
-    private const byte ComPortOption = 44;
+    private const byte TelnetBinary = TelnetOptionBinary;
+    private const byte SuppressGoAhead = TelnetOptionSuppressGoAhead;
+    private const byte ComPortOption = TelnetOptionComPortControl;
 
     private const byte SetBaudRate = 1;
     private const byte SetDataSize = 2;
@@ -72,9 +80,12 @@ public sealed class Rfc2217Client
     private SubnegotiationState _subState;
     private byte _command;
     private readonly List<byte> _subnegotiation = [];
+    private readonly HashSet<byte> _usEnabledOptions = [];
+    private readonly HashSet<byte> _peerEnabledOptions = [];
 
     public byte[] BuildInitialNegotiation()
     {
+        MarkInitialNegotiationRequested();
         return
         [
             Iac, Will, ComPortOption,
@@ -122,6 +133,7 @@ public sealed class Rfc2217Client
         var serial = new List<byte>(length);
         var replies = new List<byte>();
         var events = new List<Rfc2217Notification>();
+        var options = new List<Rfc2217TelnetOptionEvent>();
 
         for (var i = 0; i < length; i++)
         {
@@ -164,6 +176,7 @@ public sealed class Rfc2217Client
 
                 case ParserState.Option:
                     AddNegotiationReply(replies, _command, value);
+                    options.Add(BuildTelnetOptionEvent(_command, value));
                     _state = ParserState.Data;
                     break;
 
@@ -198,7 +211,7 @@ public sealed class Rfc2217Client
             }
         }
 
-        return new Rfc2217Frame(serial.ToArray(), replies.ToArray(), events.ToArray());
+        return new Rfc2217Frame(serial.ToArray(), replies.ToArray(), events.ToArray(), options.ToArray());
     }
 
     public static byte[] EscapeSerialData(byte[] buffer, int offset, int length)
@@ -323,6 +336,11 @@ public sealed class Rfc2217Client
     public static bool IsFlowControlCommand(byte command)
     {
         return command is FlowControlSuspend or FlowControlResume;
+    }
+
+    public static bool IsSupportedTelnetOption(byte option)
+    {
+        return option is TelnetBinary or SuppressGoAhead or ComPortOption;
     }
 
     public static bool IsCompatibleSetControlAcceptedValue(byte requested, byte accepted)
@@ -536,17 +554,38 @@ public sealed class Rfc2217Client
         return frame.ToArray();
     }
 
-    private static void AddNegotiationReply(List<byte> replies, byte command, byte option)
+    private void MarkInitialNegotiationRequested()
     {
-        var accept = option is TelnetBinary or SuppressGoAhead or ComPortOption;
-        var reply = command switch
+        foreach (var option in new[] { TelnetBinary, SuppressGoAhead, ComPortOption })
         {
-            Do => accept ? Will : Wont,
-            Dont => Wont,
-            Will => accept ? Do : Dont,
-            Wont => Dont,
-            _ => (byte)0
-        };
+            _usEnabledOptions.Add(option);
+            _peerEnabledOptions.Add(option);
+        }
+    }
+
+    private void AddNegotiationReply(List<byte> replies, byte command, byte option)
+    {
+        var accept = IsSupportedTelnetOption(option);
+        var reply = (byte)0;
+        switch (command)
+        {
+            case Do:
+                reply = accept
+                    ? _usEnabledOptions.Add(option) ? Will : (byte)0
+                    : Wont;
+                break;
+            case Dont:
+                reply = _usEnabledOptions.Remove(option) ? Wont : (byte)0;
+                break;
+            case Will:
+                reply = accept
+                    ? _peerEnabledOptions.Add(option) ? Do : (byte)0
+                    : Dont;
+                break;
+            case Wont:
+                reply = _peerEnabledOptions.Remove(option) ? Dont : (byte)0;
+                break;
+        }
 
         if (reply != 0)
         {
@@ -554,6 +593,12 @@ public sealed class Rfc2217Client
             replies.Add(reply);
             replies.Add(option);
         }
+    }
+
+    private static Rfc2217TelnetOptionEvent BuildTelnetOptionEvent(byte command, byte option)
+    {
+        var accepted = (command is Do or Will) && IsSupportedTelnetOption(option);
+        return new Rfc2217TelnetOptionEvent(command, option, accepted);
     }
 
     private static void ParseSubnegotiation(List<byte> data, List<byte> replies, List<Rfc2217Notification> events)
@@ -632,9 +677,46 @@ public sealed class Rfc2217Client
     }
 }
 
-public sealed record Rfc2217Frame(byte[] SerialData, byte[] Replies, IReadOnlyList<Rfc2217Notification> Notifications);
+public sealed record Rfc2217Frame(
+    byte[] SerialData,
+    byte[] Replies,
+    IReadOnlyList<Rfc2217Notification> Notifications,
+    IReadOnlyList<Rfc2217TelnetOptionEvent> TelnetOptions);
 
 public sealed record Rfc2217Notification(byte Command, byte[] Payload);
+
+public sealed record Rfc2217TelnetOptionEvent(byte Command, byte Option, bool Accepted)
+{
+    public bool Rejected => !Accepted;
+
+    public string Describe()
+    {
+        return $"{CommandName(Command)} {OptionName(Option)} {(Accepted ? "accepted" : "rejected")}";
+    }
+
+    private static string CommandName(byte command)
+    {
+        return command switch
+        {
+            Rfc2217Client.TelnetCommandDo => "DO",
+            Rfc2217Client.TelnetCommandDont => "DONT",
+            Rfc2217Client.TelnetCommandWill => "WILL",
+            Rfc2217Client.TelnetCommandWont => "WONT",
+            _ => command.ToString()
+        };
+    }
+
+    private static string OptionName(byte option)
+    {
+        return option switch
+        {
+            Rfc2217Client.TelnetOptionComPortControl => "COM-PORT-OPTION",
+            Rfc2217Client.TelnetOptionBinary => "BINARY",
+            Rfc2217Client.TelnetOptionSuppressGoAhead => "SUPPRESS-GO-AHEAD",
+            _ => $"option-{option}"
+        };
+    }
+}
 
 public sealed record Rfc2217ExpectedAck(
     byte Command,

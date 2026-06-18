@@ -248,6 +248,11 @@ public sealed class KmdfTunnelSession : IDisposable
                     await WriteNetworkAsync(stream, frame.Replies).ConfigureAwait(false);
                 }
 
+                foreach (var option in frame.TelnetOptions)
+                {
+                    ApplyTelnetOption(option);
+                }
+
                 foreach (var notification in frame.Notifications)
                 {
                     ApplyNotification(notification);
@@ -370,6 +375,32 @@ public sealed class KmdfTunnelSession : IDisposable
             var input = new byte[4];
             WriteUInt32(input, 0, Rfc2217Client.MapNotifyLineStateToWindowsErrors(notification.Payload[0]));
             DeviceIoControlChecked(_commandDriver, IoctlSetLineState, input, null);
+        }
+    }
+
+    private void ApplyTelnetOption(Rfc2217TelnetOptionEvent option)
+    {
+        if (option.Option == Rfc2217Client.TelnetOptionComPortControl)
+        {
+            if (option.Rejected)
+            {
+                throw new IOException($"RFC2217 endpoint rejected Telnet COM-PORT-OPTION ({option.Describe()}). This endpoint is not exposing RFC2217 serial-control negotiation.");
+            }
+
+            _log.Info(_mapping.Name, $"RFC2217 Telnet negotiation {option.Describe()}.");
+            return;
+        }
+
+        if (option.Option is Rfc2217Client.TelnetOptionBinary or Rfc2217Client.TelnetOptionSuppressGoAhead)
+        {
+            if (option.Rejected)
+            {
+                _log.Warn(_mapping.Name, $"RFC2217 Telnet negotiation {option.Describe()}; continuing with degraded Telnet compatibility.");
+            }
+            else
+            {
+                _log.Info(_mapping.Name, $"RFC2217 Telnet negotiation {option.Describe()}.");
+            }
         }
     }
 

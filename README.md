@@ -49,6 +49,8 @@ DTR, RTS, and BREAK state without changing them.
 If the endpoint omits the initial line/modem-state mask ACKs, the probe reports
 the missing ACKs and continues; later setting/control ACK failures still fail
 the probe.
+If the endpoint explicitly rejects Telnet `COM-PORT-OPTION`, the KMDF backend
+fails fast because the peer is not offering RFC2217 serial-control negotiation.
 Add `--probe-controls` only on a safe target to verify DTR, RTS, BREAK, and
 purge ACKs; those controls can reset or disturb some connected boards.
 Use the built-in fake RFC2217 server to validate the full probe path locally:
