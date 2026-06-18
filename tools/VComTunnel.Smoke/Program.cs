@@ -5,15 +5,14 @@ using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using VComTunnel.Core;
 
-var portName = args.FirstOrDefault() ?? "COM27";
-var tcpPort = args.Skip(1).Select(value => int.TryParse(value, out var parsed) ? parsed : 0).FirstOrDefault();
-if (tcpPort <= 0)
+var options = SmokeOptions.Parse(args);
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(options.TimeoutSeconds));
+Task? server = null;
+if (!options.Remote)
 {
-    tcpPort = 44000;
+    server = FakeRfc2217EchoServer.RunAsync(options.Port, cts.Token);
 }
 
-using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-var server = FakeRfc2217EchoServer.RunAsync(tcpPort, cts.Token);
 var log = new InMemoryLog();
 using var session = new KmdfTunnelSession(
     new TunnelMapping
@@ -21,10 +20,10 @@ using var session = new KmdfTunnelSession(
         Id = "smoke",
         Name = "KMDF Smoke",
         Backend = TunnelBackend.Kmdf,
-        VisiblePort = portName,
+        VisiblePort = options.PortName,
         BackingPort = null,
-        Host = "127.0.0.1",
-        Port = tcpPort,
+        Host = options.Host,
+        Port = options.Port,
         Protocol = TunnelProtocol.Rfc2217,
         RestartOnFailure = false
     },
@@ -35,36 +34,98 @@ await session.StartAsync(cts.Token);
 await Task.Delay(300, cts.Token);
 
 var payload = new byte[] { 0x56, 0x43, 0x54, 0xFF, 0x4F, 0x4B };
-using var serial = NativeSerial.Open(portName);
+using var serial = NativeSerial.Open(options.PortName);
 serial.Write(payload);
 await Task.Delay(300, cts.Token);
 Console.WriteLine($"inQueue before read: {serial.GetInQueue()}");
-var received = await serial.ReadUntilAsync(payload.Length, TimeSpan.FromSeconds(3), cts.Token);
+var received = await serial.ReadUntilAsync(payload.Length, TimeSpan.FromSeconds(options.ReadSeconds), cts.Token);
 Console.WriteLine($"inQueue after read: {serial.GetInQueue()}");
 
 Console.WriteLine($"tx: {Convert.ToHexString(payload)}");
 Console.WriteLine($"rx: {Convert.ToHexString(received)}");
-foreach (var entry in log.Snapshot(20))
+var entries = log.Snapshot(20);
+foreach (var entry in entries)
 {
     Console.WriteLine($"{entry.Level} {entry.Source}: {entry.Message}");
 }
 
-if (!payload.SequenceEqual(received))
+var hasTx = entries.Any(entry => entry.Message.Contains("KMDF TX event", StringComparison.OrdinalIgnoreCase));
+if (!hasTx)
+{
+    throw new InvalidOperationException("KMDF did not report a TX event.");
+}
+
+if (options.ExpectEcho && !payload.SequenceEqual(received))
 {
     throw new InvalidOperationException("RFC2217 smoke echo mismatch.");
 }
 
 session.Dispose();
 cts.Cancel();
-try
+if (server is not null)
 {
-    await server;
-}
-catch (OperationCanceledException)
-{
+    try
+    {
+        await server;
+    }
+    catch (OperationCanceledException)
+    {
+    }
+    catch (IOException)
+    {
+    }
 }
 
-Console.WriteLine("RFC2217 smoke passed.");
+if (payload.SequenceEqual(received))
+{
+    Console.WriteLine("RFC2217 smoke passed.");
+}
+else if (options.Remote)
+{
+    Console.WriteLine("RFC2217 remote smoke completed. TX path was observed; RX echo was not required.");
+}
+else
+{
+    throw new InvalidOperationException("RFC2217 smoke echo mismatch.");
+}
+
+internal sealed record SmokeOptions(
+    string PortName,
+    string Host,
+    int Port,
+    bool Remote,
+    bool ExpectEcho,
+    int TimeoutSeconds,
+    int ReadSeconds)
+{
+    public static SmokeOptions Parse(string[] args)
+    {
+        var remote = args.Any(arg => string.Equals(arg, "--remote", StringComparison.OrdinalIgnoreCase));
+        var expectEcho = args.Any(arg => string.Equals(arg, "--expect-echo", StringComparison.OrdinalIgnoreCase)) || !remote;
+        var values = args
+            .Where(arg => !arg.StartsWith("--", StringComparison.Ordinal))
+            .ToArray();
+
+        if (remote)
+        {
+            if (values.Length < 3 || !int.TryParse(values[2], out var remotePort) || remotePort <= 0)
+            {
+                throw new ArgumentException("Usage: VComTunnel.Smoke --remote COM27 10.0.2.196 5000 [--expect-echo]");
+            }
+
+            return new SmokeOptions(values[0], values[1], remotePort, true, expectEcho, 10, 2);
+        }
+
+        var portName = values.FirstOrDefault() ?? "COM27";
+        var tcpPort = values.Skip(1).Select(value => int.TryParse(value, out var parsed) ? parsed : 0).FirstOrDefault();
+        if (tcpPort <= 0)
+        {
+            tcpPort = 44000;
+        }
+
+        return new SmokeOptions(portName, "127.0.0.1", tcpPort, false, expectEcho, 10, 3);
+    }
+}
 
 internal sealed class NativeSerial : IDisposable
 {
