@@ -300,7 +300,8 @@ requests.
 queues it as a `TxData` service event ahead of the normal TX ring buffer. The
 service sends it through the existing RFC2217 serial-data path, including IAC
 escaping and remote flow-control gating. If the service is not attached, the
-IOCTL fails with `STATUS_DEVICE_NOT_READY`.
+IOCTL fails with `STATUS_DEVICE_NOT_READY`; the same failure is returned while
+the service has marked the RFC2217 connection faulted or disconnected.
 
 ## Manual Flow Control
 
@@ -308,7 +309,8 @@ IOCTL fails with `STATUS_DEVICE_NOT_READY`.
 event for the service. The service translates those events to RFC2217
 `FLOWCONTROL-SUSPEND` and `FLOWCONTROL-RESUME` respectively, asking the remote
 endpoint to pause or resume data sent toward the local COM port. If the service
-is not attached, the IOCTL fails with `STATUS_DEVICE_NOT_READY`.
+is not attached, faulted, or disconnected, the IOCTL fails with
+`STATUS_DEVICE_NOT_READY`.
 
 ## Raw Modem Control
 

@@ -150,6 +150,10 @@ Current implementation note:
 - `IOCTL_SERIAL_IMMEDIATE_CHAR` is delivered as a one-byte TxData event ahead
   of queued TX ring-buffer bytes, using the same RFC2217 serial-data path and
   IAC escaping as normal writes.
+- Serial writes, immediate-char writes, and local XON/XOFF flow-control IOCTLs
+  require an attached service with `Connecting` or `Connected` state. Faulted or
+  disconnected mappings return `STATUS_DEVICE_NOT_READY`; configuration changes
+  can still update cached local state and will be replayed on the next attach.
 - Remaining hardening: additional serial events beyond the current wait-mask
   subset and live hardware/tool compatibility validation.
 

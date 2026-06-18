@@ -51,6 +51,15 @@ VctReadTimeoutMilliseconds(
         : (ULONG)total;
 }
 
+static BOOLEAN
+VctIsConnectionActiveLocked(
+    _In_ PDEVICE_CONTEXT Context
+    )
+{
+    return Context->ConnectionState == VComTunnelConnecting ||
+        Context->ConnectionState == VComTunnelConnected;
+}
+
 static NTSTATUS
 VctCopyOutputBuffer(
     _In_ WDFREQUEST Request,
@@ -678,7 +687,7 @@ VctQueueControlEvent(
     WDFREQUEST serviceWait = NULL;
 
     WdfSpinLockAcquire(Context->Lock);
-    if (Context->ServiceAttached) {
+    if (Context->ServiceAttached && VctIsConnectionActiveLocked(Context)) {
         VctEnqueueControlEventLocked(Context, Type, Payload, PayloadSize);
         if (Context->PendingServiceWait != NULL) {
             serviceWait = Context->PendingServiceWait;
@@ -702,7 +711,7 @@ VctQueueImmediateChar(
     WDFREQUEST serviceWait = NULL;
 
     WdfSpinLockAcquire(Context->Lock);
-    if (!Context->ServiceAttached) {
+    if (!Context->ServiceAttached || !VctIsConnectionActiveLocked(Context)) {
         status = STATUS_DEVICE_NOT_READY;
     } else {
         VctEnqueueControlEventLocked(
@@ -739,7 +748,7 @@ VctQueueLocalFlowControl(
     event.Suspend = Suspend;
 
     WdfSpinLockAcquire(Context->Lock);
-    if (!Context->ServiceAttached) {
+    if (!Context->ServiceAttached || !VctIsConnectionActiveLocked(Context)) {
         status = STATUS_DEVICE_NOT_READY;
     } else {
         VctEnqueueControlEventLocked(
@@ -1648,8 +1657,7 @@ VctEvtIoRead(
     WdfSpinLockAcquire(context->Lock);
     if (context->RxCount > 0) {
         copied = VctRxCopyOutLocked(context, readBuffer, (ULONG)readBufferLength);
-    } else if (context->ConnectionState != VComTunnelConnecting &&
-        context->ConnectionState != VComTunnelConnected) {
+    } else if (!VctIsConnectionActiveLocked(context)) {
         status = STATUS_DEVICE_NOT_READY;
     } else if (context->PendingRead != NULL) {
         status = STATUS_DEVICE_BUSY;
@@ -1748,10 +1756,12 @@ VctEvtIoWrite(
 
     status = STATUS_DEVICE_NOT_READY;
     WdfSpinLockAcquire(context->Lock);
-    if (context->ServiceAttached && context->PendingServiceWait != NULL) {
+    if (context->ServiceAttached &&
+        VctIsConnectionActiveLocked(context) &&
+        context->PendingServiceWait != NULL) {
         serviceWait = context->PendingServiceWait;
         context->PendingServiceWait = NULL;
-    } else if (context->ServiceAttached) {
+    } else if (context->ServiceAttached && VctIsConnectionActiveLocked(context)) {
         if (inputLength > (VCOMTUNNEL_TX_QUEUE_SIZE - context->TxCount)) {
             status = STATUS_BUFFER_OVERFLOW;
         } else {
