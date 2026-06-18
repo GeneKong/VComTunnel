@@ -53,7 +53,7 @@ public sealed class KmdfTunnelSession : IDisposable
             throw new PlatformNotSupportedException("KMDF backend is only available on Windows.");
         }
 
-        _driver = OpenDriver(_mapping.VisiblePort);
+        _driver = OpenDriver();
         Attach();
 
         _tcp = new TcpClient();
@@ -93,9 +93,9 @@ public sealed class KmdfTunnelSession : IDisposable
         _stop.Dispose();
     }
 
-    private static SafeFileHandle OpenDriver(string visiblePort)
+    private static SafeFileHandle OpenDriver()
     {
-        var path = @"\\.\" + visiblePort.Trim();
+        const string path = @"\\.\VComTunnelCtl0";
         var handle = CreateFileW(
             path,
             GenericRead | GenericWrite,
@@ -107,7 +107,7 @@ public sealed class KmdfTunnelSession : IDisposable
 
         if (handle.IsInvalid)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not open KMDF virtual serial port {path}.");
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not open KMDF control channel {path}.");
         }
 
         return handle;

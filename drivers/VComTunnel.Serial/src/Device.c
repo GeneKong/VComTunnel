@@ -1,3 +1,4 @@
+#include <initguid.h>
 #include "Driver.h"
 
 static VOID
@@ -22,6 +23,86 @@ VctInitializeSerialDefaults(
     Context->Handflow.XoffLimit = 0;
     Context->ModemStatus = SERIAL_CTS_STATE | SERIAL_DSR_STATE | SERIAL_DCD_STATE;
     Context->ConnectionState = VComTunnelDisconnected;
+    RtlStringCchCopyW(Context->PortName, RTL_NUMBER_OF(Context->PortName), VCOMTUNNEL_DEFAULT_PORT_NAME);
+}
+
+static VOID
+VctReadAssignedPortName(
+    _In_ WDFDEVICE Device,
+    _Inout_ PDEVICE_CONTEXT Context
+    )
+{
+    NTSTATUS status;
+    WDFKEY key;
+    UNICODE_STRING valueName;
+    UNICODE_STRING portName;
+
+    status = WdfDeviceOpenRegistryKey(Device, PLUGPLAY_REGKEY_DEVICE, KEY_READ, WDF_NO_OBJECT_ATTRIBUTES, &key);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    RtlInitUnicodeString(&valueName, L"PortName");
+    RtlInitEmptyUnicodeString(&portName, Context->PortName, sizeof(Context->PortName));
+    status = WdfRegistryQueryUnicodeString(key, &valueName, NULL, &portName);
+    WdfRegistryClose(key);
+
+    if (NT_SUCCESS(status)) {
+        Context->PortName[portName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+}
+
+static NTSTATUS
+VctCreateComLink(
+    _In_ WDFDEVICE Device,
+    _In_ PDEVICE_CONTEXT Context
+    )
+{
+    WCHAR linkBuffer[64];
+    UNICODE_STRING comLink;
+
+    NTSTATUS status = RtlStringCchPrintfW(
+        linkBuffer,
+        RTL_NUMBER_OF(linkBuffer),
+        L"%ws%ws",
+        VCOMTUNNEL_COM_LINK_PREFIX,
+        Context->PortName);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(&comLink, linkBuffer);
+    status = WdfDeviceCreateSymbolicLink(Device, &comLink);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(&comLink, VCOMTUNNEL_CONTROL_LINK);
+    return WdfDeviceCreateSymbolicLink(Device, &comLink);
+}
+
+static VOID
+VctRegisterSerialCommName(
+    _In_ WDFDEVICE Device,
+    _In_ PDEVICE_CONTEXT Context
+    )
+{
+    NTSTATUS status;
+    WDFKEY key;
+    UNICODE_STRING keyName;
+    UNICODE_STRING valueName;
+    UNICODE_STRING portName;
+
+    RtlInitUnicodeString(&keyName, L"SERIALCOMM");
+    status = WdfDeviceOpenDevicemapKey(Device, &keyName, KEY_SET_VALUE, WDF_NO_OBJECT_ATTRIBUTES, &key);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    RtlInitUnicodeString(&valueName, VCOMTUNNEL_NT_DEVICE_NAME);
+    RtlInitUnicodeString(&portName, Context->PortName);
+    WdfRegistryAssignUnicodeString(key, &valueName, &portName);
+    WdfRegistryClose(key);
 }
 
 NTSTATUS
@@ -34,7 +115,8 @@ VctEvtDeviceAdd(
     WDFDEVICE device;
     WDF_OBJECT_ATTRIBUTES deviceAttributes;
     WDF_FILEOBJECT_CONFIG fileConfig;
-    UNICODE_STRING comLink;
+    UNICODE_STRING ntDeviceName;
+    UNICODE_STRING sddl;
     PDEVICE_CONTEXT context;
 
     UNREFERENCED_PARAMETER(Driver);
@@ -42,6 +124,17 @@ VctEvtDeviceAdd(
     WdfDeviceInitSetDeviceType(DeviceInit, FILE_DEVICE_SERIAL_PORT);
     WdfDeviceInitSetIoType(DeviceInit, WdfDeviceIoBuffered);
     WdfDeviceInitSetCharacteristics(DeviceInit, FILE_DEVICE_SECURE_OPEN, FALSE);
+    RtlInitUnicodeString(&ntDeviceName, VCOMTUNNEL_NT_DEVICE_NAME);
+    status = WdfDeviceInitAssignName(DeviceInit, &ntDeviceName);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(&sddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)");
+    status = WdfDeviceInitAssignSDDLString(DeviceInit, &sddl);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
 
     WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, VctEvtDeviceFileCreate, VctEvtFileClose, WDF_NO_EVENT_CALLBACK);
     WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, WDF_NO_OBJECT_ATTRIBUTES);
@@ -55,17 +148,24 @@ VctEvtDeviceAdd(
 
     context = DeviceGetContext(device);
     VctInitializeSerialDefaults(context);
+    VctReadAssignedPortName(device, context);
 
     status = WdfSpinLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &context->Lock);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    RtlInitUnicodeString(&comLink, VCOMTUNNEL_DEFAULT_COM_LINK);
-    status = WdfDeviceCreateSymbolicLink(device, &comLink);
+    status = VctCreateComLink(device, context);
     if (!NT_SUCCESS(status)) {
         return status;
     }
+
+    status = WdfDeviceCreateDeviceInterface(device, &GUID_DEVINTERFACE_COMPORT, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    VctRegisterSerialCommName(device, context);
 
     status = VctQueueInitialize(device);
     if (!NT_SUCCESS(status)) {

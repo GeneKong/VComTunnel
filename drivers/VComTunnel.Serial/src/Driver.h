@@ -7,7 +7,9 @@
 
 #include "VComTunnelIoctl.h"
 
-#define VCOMTUNNEL_DEFAULT_COM_LINK L"\\DosDevices\\COM40"
+#define VCOMTUNNEL_NT_DEVICE_NAME L"\\Device\\VComTunnelSerial0"
+#define VCOMTUNNEL_COM_LINK_PREFIX L"\\DosDevices\\"
+#define VCOMTUNNEL_CONTROL_LINK L"\\DosDevices\\VComTunnelCtl0"
 #define VCOMTUNNEL_DEFAULT_PORT_NAME L"COM40"
 #define VCOMTUNNEL_RX_QUEUE_SIZE 4096
 #define VCOMTUNNEL_TX_QUEUE_SIZE 4096
@@ -26,6 +28,7 @@ typedef struct _DEVICE_CONTEXT {
     BOOLEAN ServiceAttached;
     VCOMTUNNEL_CONNECTION_STATE ConnectionState;
     WDFQUEUE DefaultQueue;
+    WCHAR PortName[32];
     WDFREQUEST PendingRead;
     WDFREQUEST PendingServiceWait;
     ULONGLONG NextSequence;

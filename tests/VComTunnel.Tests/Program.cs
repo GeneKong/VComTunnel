@@ -216,7 +216,7 @@ static async Task KmdfMappingFaultsWhenDriverIsMissingAsync()
 
     var status = await orchestrator.StartAsync((await store.LoadAsync()).Mappings.Single().Id);
     AssertEqual(TunnelRunState.Faulted.ToString(), status.State.ToString());
-    AssertStringContains(status.LastError ?? "", "Could not open KMDF virtual serial port");
+    AssertStringContains(status.LastError ?? "", "Could not open KMDF control channel");
 }
 
 static async Task Com0comCreateAndRemovePlansAsync()

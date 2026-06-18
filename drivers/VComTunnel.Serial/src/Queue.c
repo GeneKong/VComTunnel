@@ -191,7 +191,7 @@ VctCompleteAttach(
     response.ProtocolMinor = VCOMTUNNEL_PROTOCOL_MINOR;
     response.MaxEventBytes = VCOMTUNNEL_MAX_EVENT_BYTES;
     response.MaxRxBytes = VCOMTUNNEL_MAX_RX_BYTES;
-    RtlStringCchCopyW(response.PortName, RTL_NUMBER_OF(response.PortName), VCOMTUNNEL_DEFAULT_PORT_NAME);
+    RtlStringCchCopyW(response.PortName, RTL_NUMBER_OF(response.PortName), Context->PortName);
 
     return VctCopyOutputBuffer(Request, &response, sizeof(response));
 }
