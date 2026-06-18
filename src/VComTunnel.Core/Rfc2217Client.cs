@@ -284,6 +284,19 @@ public sealed class Rfc2217Client
         };
     }
 
+    public static byte MapRfc2217ParityToWindows(byte rfc2217Parity)
+    {
+        return rfc2217Parity switch
+        {
+            1 => 0,
+            2 => 1,
+            3 => 2,
+            4 => 3,
+            5 => 4,
+            _ => 0
+        };
+    }
+
     public static byte MapWindowsStopBitsToRfc2217(byte windowsStopBits)
     {
         return windowsStopBits switch
@@ -292,6 +305,17 @@ public sealed class Rfc2217Client
             1 => 3,
             2 => 2,
             _ => 1
+        };
+    }
+
+    public static byte MapRfc2217StopBitsToWindows(byte rfc2217StopBits)
+    {
+        return rfc2217StopBits switch
+        {
+            1 => 0,
+            2 => 2,
+            3 => 1,
+            _ => 0
         };
     }
 

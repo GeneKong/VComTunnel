@@ -84,6 +84,11 @@ Current implementation note:
   The service waits for the expected ACK command and accepted value, retries
   once on timeout, and faults the tunnel if the peer rejects the value or does
   not acknowledge after retry.
+- Server-to-client accepted baud/data/parity/stop settings that are not consumed
+  by a pending ACK wait update the driver's cached serial settings, matching
+  hub4com's COM-PORT-OPTION client behavior.
+- The service requires driver protocol 1.1 so remote accepted settings can use
+  `IOCTL_VCOMTUNNEL_SET_REMOTE_SETTINGS`.
 - Startup sends the initial line-state and modem-state masks and waits for
   their ACKs before the mapping is reported as running.
 - RFC2217 SIGNATURE requests are answered with the VComTunnel client signature.

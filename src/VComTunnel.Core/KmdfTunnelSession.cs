@@ -25,6 +25,12 @@ public sealed class KmdfTunnelSession : IDisposable
     private const ushort EventTypePurge = 7;
     private const uint ModemControlDtr = 0x00000001;
     private const uint ModemControlRts = 0x00000002;
+    private const uint RemoteBaudRate = 0x00000001;
+    private const uint RemoteWordLength = 0x00000002;
+    private const uint RemoteParity = 0x00000004;
+    private const uint RemoteStopBits = 0x00000008;
+    private const ushort ProtocolMajor = 1;
+    private const ushort ProtocolMinor = 1;
     private const int MaxEventBytes = 4096;
     private const int MaxRxBytes = 4096;
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromMilliseconds(500);
@@ -38,6 +44,7 @@ public sealed class KmdfTunnelSession : IDisposable
     private static readonly uint IoctlDetach = CtlCode(0x806);
     private static readonly uint IoctlSetModemState = CtlCode(0x807);
     private static readonly uint IoctlSetLineState = CtlCode(0x808);
+    private static readonly uint IoctlSetRemoteSettings = CtlCode(0x809);
 
     private readonly TunnelMapping _mapping;
     private readonly InMemoryLog _log;
@@ -162,13 +169,19 @@ public sealed class KmdfTunnelSession : IDisposable
     private void Attach()
     {
         var input = new byte[136];
-        WriteUInt16(input, 0, 1);
-        WriteUInt16(input, 2, 0);
+        WriteUInt16(input, 0, ProtocolMajor);
+        WriteUInt16(input, 2, ProtocolMinor);
         var instance = Encoding.Unicode.GetBytes(Environment.MachineName);
         Array.Copy(instance, 0, input, 8, Math.Min(instance.Length, 126));
 
         var output = new byte[80];
         DeviceIoControlChecked(_eventDriver, IoctlAttach, input, output);
+        var driverMajor = ReadUInt16(output, 0);
+        var driverMinor = ReadUInt16(output, 2);
+        if (driverMajor != ProtocolMajor || driverMinor < ProtocolMinor)
+        {
+            throw new InvalidOperationException($"KMDF driver protocol {driverMajor}.{driverMinor} is older than required {ProtocolMajor}.{ProtocolMinor}. Rebuild and reinstall VComTunnel.Serial.");
+        }
     }
 
     private async Task EventLoopAsync()
@@ -308,7 +321,16 @@ public sealed class KmdfTunnelSession : IDisposable
     {
         if (Rfc2217Client.IsCommandAck(notification.Command))
         {
-            CompletePendingAck(notification);
+            if (CompletePendingAck(notification))
+            {
+                return;
+            }
+
+            if (ApplyRemoteSerialSetting(notification))
+            {
+                return;
+            }
+
             return;
         }
 
@@ -336,6 +358,56 @@ public sealed class KmdfTunnelSession : IDisposable
             WriteUInt32(input, 0, Rfc2217Client.MapNotifyLineStateToWindowsErrors(notification.Payload[0]));
             DeviceIoControlChecked(_commandDriver, IoctlSetLineState, input, null);
         }
+    }
+
+    private bool ApplyRemoteSerialSetting(Rfc2217Notification notification)
+    {
+        if (notification.Command == Rfc2217Client.AckSetBaudRate)
+        {
+            if (notification.Payload.Length != 4)
+            {
+                return false;
+            }
+
+            var baudRate = ReadUInt32(notification.Payload, 0);
+            if (baudRate == 0)
+            {
+                return false;
+            }
+
+            var input = new byte[12];
+            WriteUInt32(input, 0, RemoteBaudRate);
+            WriteUInt32(input, 4, baudRate);
+            DeviceIoControlChecked(_commandDriver, IoctlSetRemoteSettings, input, null);
+            return true;
+        }
+
+        if (notification.Payload.Length != 1 || notification.Payload[0] == 0)
+        {
+            return false;
+        }
+
+        var lineInput = new byte[12];
+        switch (notification.Command)
+        {
+            case Rfc2217Client.AckSetDataSize:
+                WriteUInt32(lineInput, 0, RemoteWordLength);
+                lineInput[10] = notification.Payload[0];
+                break;
+            case Rfc2217Client.AckSetParity:
+                WriteUInt32(lineInput, 0, RemoteParity);
+                lineInput[9] = Rfc2217Client.MapRfc2217ParityToWindows(notification.Payload[0]);
+                break;
+            case Rfc2217Client.AckSetStopSize:
+                WriteUInt32(lineInput, 0, RemoteStopBits);
+                lineInput[8] = Rfc2217Client.MapRfc2217StopBitsToWindows(notification.Payload[0]);
+                break;
+            default:
+                return false;
+        }
+
+        DeviceIoControlChecked(_commandDriver, IoctlSetRemoteSettings, lineInput, null);
+        return true;
     }
 
     private async Task SendFrameWithAckAsync(NetworkStream stream, Rfc2217OutboundFrame frame)
@@ -404,15 +476,17 @@ public sealed class KmdfTunnelSession : IDisposable
         }
     }
 
-    private void CompletePendingAck(Rfc2217Notification notification)
+    private bool CompletePendingAck(Rfc2217Notification notification)
     {
         TaskCompletionSource? completion = null;
         Exception? failure = null;
+        var handled = false;
         lock (_ackLock)
         {
             var index = _pendingAcks.FindIndex(expected => expected.Matches(notification));
             if (index >= 0)
             {
+                handled = true;
                 _pendingAcks.RemoveAt(index);
                 if (_pendingAcks.Count == 0)
                 {
@@ -422,12 +496,18 @@ public sealed class KmdfTunnelSession : IDisposable
             }
             else if (_pendingAcks.Any(expected => expected.IsSameCommand(notification)))
             {
+                handled = true;
                 var expected = string.Join(", ", _pendingAcks.Select(ack => ack.Describe()));
                 failure = new IOException($"RFC2217 ack returned unexpected value {Rfc2217ExpectedAck.Describe(notification)}; expected {expected}.");
                 completion = _pendingAckCompletion;
                 _pendingAcks.Clear();
                 _pendingAckCompletion = null;
             }
+        }
+
+        if (!handled)
+        {
+            return false;
         }
 
         if (failure is not null)
@@ -438,6 +518,8 @@ public sealed class KmdfTunnelSession : IDisposable
         {
             completion?.TrySetResult();
         }
+
+        return true;
     }
 
     private Task WaitForRemoteFlowAsync()

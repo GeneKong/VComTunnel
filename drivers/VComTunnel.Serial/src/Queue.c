@@ -1104,6 +1104,29 @@ VctEvtIoDeviceControl(
         }
         break;
 
+    case IOCTL_VCOMTUNNEL_SET_REMOTE_SETTINGS:
+        {
+            VCT_REMOTE_SETTINGS settings;
+
+            status = VctCopyInputBuffer(Request, &settings, sizeof(settings));
+            if (NT_SUCCESS(status)) {
+                if ((settings.Mask & VCOMTUNNEL_REMOTE_BAUD_RATE) != 0 &&
+                    settings.BaudRate != 0) {
+                    context->BaudRate.BaudRate = settings.BaudRate;
+                }
+                if ((settings.Mask & VCOMTUNNEL_REMOTE_WORD_LENGTH) != 0) {
+                    context->LineControl.WordLength = settings.WordLength;
+                }
+                if ((settings.Mask & VCOMTUNNEL_REMOTE_PARITY) != 0) {
+                    context->LineControl.Parity = settings.Parity;
+                }
+                if ((settings.Mask & VCOMTUNNEL_REMOTE_STOP_BITS) != 0) {
+                    context->LineControl.StopBits = settings.StopBits;
+                }
+            }
+        }
+        break;
+
     case IOCTL_VCOMTUNNEL_DETACH:
         WdfSpinLockAcquire(context->Lock);
         if (context->ServiceAttached && context->ServiceFileObject == fileObject) {

@@ -16,7 +16,7 @@ Interface GUID: {TBD-VCOMTUNNEL-SERVICE-CHANNEL}
 Client:         VComTunnel.Service
 Transport:      DeviceIoControl with overlapped I/O
 Encoding:       fixed binary headers plus payload
-Version:        uint16 major/minor in every attach
+Version:        uint16 major/minor in every attach; current version 1.1
 ```
 
 Do not use JSON in the driver channel. Keep the kernel boundary fixed-size,
@@ -52,6 +52,9 @@ Use a vendor device type and private function codes.
 
 #define IOCTL_VCOMTUNNEL_SET_LINE_STATE \
     CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x808, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
+
+#define IOCTL_VCOMTUNNEL_SET_REMOTE_SETTINGS \
+    CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x809, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
 ```
 
 The M2 prototype uses `METHOD_BUFFERED` for all private IOCTLs. That keeps the
@@ -185,6 +188,35 @@ Stopping
 
 The driver uses this state for `GET_COMMSTATUS`, write failure behavior, and
 diagnostics. It must not reconnect by itself.
+
+## Remote Accepted Settings
+
+RFC2217 server-to-client `SET-BAUDRATE`, `SET-DATASIZE`, `SET-PARITY`, and
+`SET-STOPSIZE` responses are also the server's accepted serial settings. When
+one of those commands is not consumed by a pending outbound ACK wait, the
+service updates the driver's cached settings:
+
+```c
+#define VCOMTUNNEL_REMOTE_BAUD_RATE   0x00000001
+#define VCOMTUNNEL_REMOTE_WORD_LENGTH 0x00000002
+#define VCOMTUNNEL_REMOTE_PARITY      0x00000004
+#define VCOMTUNNEL_REMOTE_STOP_BITS   0x00000008
+
+struct VCT_REMOTE_SETTINGS {
+    UINT32 Mask;
+    UINT32 BaudRate;
+    UCHAR  StopBits;
+    UCHAR  Parity;
+    UCHAR  WordLength;
+    UCHAR  Reserved;
+};
+```
+
+The driver applies only fields selected by `Mask`. This keeps
+`IOCTL_SERIAL_GET_BAUD_RATE` and `IOCTL_SERIAL_GET_LINE_CONTROL` aligned with
+unsolicited or delayed RFC2217 accepted-setting notifications, while normal
+local serial IOCTLs still generate outbound RFC2217 control events. This IOCTL
+requires protocol minor version 1 or newer.
 
 ## Remote Modem And Line State
 

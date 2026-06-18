@@ -279,6 +279,8 @@ static void Rfc2217AckSemantics()
     AssertEqual("17", Rfc2217Client.MapOutboundFlowControl(0x20, 0).ToString());
     AssertEqual("18", Rfc2217Client.MapInboundFlowControl(0x02, 0).ToString());
     AssertEqual("3", Rfc2217Client.MapPurge(0x0C).ToString());
+    AssertEqual("2", Rfc2217Client.MapRfc2217ParityToWindows(3).ToString());
+    AssertEqual("1", Rfc2217Client.MapRfc2217StopBitsToWindows(3).ToString());
 }
 
 static void Rfc2217NotificationMappings()
@@ -361,12 +363,14 @@ static async Task KmdfMappingReportsStartupFaultAsync()
     AssertEqual(TunnelRunState.Faulted.ToString(), status.State.ToString());
     AssertStringContainsAny(status.LastError ?? "",
         "Could not open KMDF control channel",
+        "KMDF driver protocol",
         "Could not connect to RFC2217 endpoint");
 
     var secondStatus = await orchestrator.StartAsync((await store.LoadAsync()).Mappings.Single().Id);
     AssertEqual(TunnelRunState.Faulted.ToString(), secondStatus.State.ToString());
     AssertStringContainsAny(secondStatus.LastError ?? "",
         "Could not open KMDF control channel",
+        "KMDF driver protocol",
         "Could not connect to RFC2217 endpoint");
 }
 
