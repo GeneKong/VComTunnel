@@ -187,24 +187,21 @@ static void Rfc2217CommandEncoding()
             0xFF, 0xFD, 0x00,
             0xFF, 0xFB, 0x03,
             0xFF, 0xFD, 0x03,
-            0xFF, 0xFA, 0x2C, 0x0A, 0x1E, 0xFF, 0xF0,
+            0xFF, 0xFA, 0x2C, 0x0A, 0xFF, 0xFF, 0xFF, 0xF0,
             0xFF, 0xFA, 0x2C, 0x0B, 0xFF, 0xFF, 0xFF, 0xF0
         ],
         new Rfc2217Client().BuildInitialNegotiation());
     var initialAcks = Rfc2217Client.BuildInitialExpectedAcks();
     AssertEqual("2", initialAcks.Length.ToString());
     AssertTrue(
-        initialAcks[0].Matches(new Rfc2217Notification(Rfc2217Client.AckSetLineStateMask, [0x1E])),
-        "Initial line-state mask ACK should require the configured error mask.");
+        initialAcks[0].Matches(new Rfc2217Notification(Rfc2217Client.AckSetLineStateMask, [0xFF])),
+        "Initial line-state mask ACK should accept the configured full mask.");
     AssertTrue(
         initialAcks[1].Matches(new Rfc2217Notification(Rfc2217Client.AckSetModemStateMask, [0xFF])),
         "Initial modem-state mask ACK should require the configured modem mask.");
     AssertTrue(
-        initialAcks[0].Matches(new Rfc2217Notification(Rfc2217Client.AckSetLineStateMask, [0x0E])),
+        initialAcks[0].Matches(new Rfc2217Notification(Rfc2217Client.AckSetLineStateMask, [0x1E])),
         "Initial line-state mask ACK may be a subset of the requested events.");
-    AssertTrue(
-        !initialAcks[0].Matches(new Rfc2217Notification(Rfc2217Client.AckSetLineStateMask, [0x20])),
-        "Initial line-state mask ACK must not accept bits that were not requested.");
 
     AssertBytes(
         [0xFF, 0xFA, 0x2C, 0x01, 0x00, 0x01, 0xC2, 0x00, 0xFF, 0xF0],
@@ -283,7 +280,7 @@ static void Hub4comRfc2217ClientBaseline()
         initial.Take(18).ToArray());
     AssertRfc2217Notifications(
         initial,
-        new Rfc2217Notification(10, [0x1E]),
+        new Rfc2217Notification(10, [0xFF]),
         new Rfc2217Notification(11, [0xFF]));
 
     AssertRfc2217Notifications(
@@ -341,6 +338,7 @@ static void Hub4comRfc2217ClientBaseline()
     AssertEqual("240", Rfc2217Client.MapNotifyModemStateToWindowsStatus(0xF0).ToString());
     AssertEqual("312", Rfc2217Client.MapNotifyModemStateToWindowsEvents(0x0F).ToString());
     AssertEqual("23", Rfc2217Client.MapNotifyLineStateToWindowsErrors(0x1E).ToString());
+    AssertEqual("23", Rfc2217Client.MapNotifyLineStateToWindowsErrors(0xFF).ToString());
 }
 
 static void Rfc2217TelnetParser()
@@ -530,6 +528,7 @@ static void Rfc2217NotificationMappings()
     AssertEqual("312", Rfc2217Client.MapNotifyModemStateToWindowsEvents(0x0F).ToString());
     AssertEqual("0", Rfc2217Client.MapNotifyModemStateToWindowsEvents(0xB0).ToString());
     AssertEqual("23", Rfc2217Client.MapNotifyLineStateToWindowsErrors(0x1E).ToString());
+    AssertEqual("23", Rfc2217Client.MapNotifyLineStateToWindowsErrors(0xFF).ToString());
 }
 
 static void Com2TcpCommandUsesBatchWrapper()

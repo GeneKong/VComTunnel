@@ -52,7 +52,7 @@ public sealed class Rfc2217Client
     private const byte PurgeData = 12;
     private const byte LocalFlowControlSuspend = 8;
     private const byte LocalFlowControlResume = 9;
-    private const byte LineStateErrorMask = 0x1E;
+    private const byte LineStateMask = 0xFF;
     private const byte ModemStateMask = 0xFF;
     private const string ClientSignature = "VComTunnel";
 
@@ -96,7 +96,7 @@ public sealed class Rfc2217Client
             Iac, Do, TelnetBinary,
             Iac, Will, SuppressGoAhead,
             Iac, Do, SuppressGoAhead,
-            .. BuildSetLineStateMask(LineStateErrorMask),
+            .. BuildSetLineStateMask(LineStateMask),
             .. BuildSetModemStateMask(ModemStateMask)
         ];
     }
@@ -125,7 +125,7 @@ public sealed class Rfc2217Client
     {
         return
         [
-            new(AckSetLineStateMask, [LineStateErrorMask], AllowPayloadBitSubset: true),
+            new(AckSetLineStateMask, [LineStateMask], AllowPayloadBitSubset: true),
             new(AckSetModemStateMask, [ModemStateMask], AllowPayloadBitSubset: true)
         ];
     }
