@@ -191,6 +191,8 @@ plus serial RX/TX/error statistics through `IOCTL_SERIAL_GET_STATS` and
 `IOCTL_SERIAL_CLEAR_STATS`, and immediate-character transmit through
 `IOCTL_SERIAL_IMMEDIATE_CHAR`. Windows serial configuration probes
 (`CONFIG_SIZE`, `GET_COMMCONFIG`, and `SET_COMMCONFIG`) return a minimal RS232
-configuration with no provider-specific data.
+configuration with no provider-specific data; queue-size requests are validated
+against the fixed virtual queues, and FIFO/default-configuration UART requests
+are accepted as no-op compatibility calls.
 Remaining hardening work is broader serial compatibility coverage and live ESP-DAP
 compatibility validation against real tools.

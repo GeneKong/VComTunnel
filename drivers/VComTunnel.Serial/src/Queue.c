@@ -157,6 +157,27 @@ VctAcceptCommConfig(
 }
 
 static NTSTATUS
+VctSetQueueSize(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status;
+    SERIAL_QUEUE_SIZE queueSize;
+
+    status = VctCopyInputBuffer(Request, &queueSize, sizeof(queueSize));
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    if (queueSize.InSize > VCOMTUNNEL_RX_QUEUE_SIZE ||
+        queueSize.OutSize > VCOMTUNNEL_TX_QUEUE_SIZE) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 VctCompleteCommStatus(
     _In_ WDFREQUEST Request,
     _In_ PDEVICE_CONTEXT Context
@@ -1370,8 +1391,13 @@ VctEvtIoDeviceControl(
         }
         break;
 
-    case IOCTL_SERIAL_RESET_DEVICE:
     case IOCTL_SERIAL_SET_QUEUE_SIZE:
+        status = VctSetQueueSize(Request);
+        break;
+
+    case IOCTL_SERIAL_RESET_DEVICE:
+    case IOCTL_SERIAL_SET_FIFO_CONTROL:
+    case IOCTL_SERIAL_APPLY_DEFAULT_CONFIGURATION:
         break;
 
     case IOCTL_SERIAL_SET_BREAK_ON:

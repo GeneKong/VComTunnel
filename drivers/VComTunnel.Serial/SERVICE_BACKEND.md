@@ -126,6 +126,9 @@ Current implementation note:
 - The driver supports `IOCTL_SERIAL_CONFIG_SIZE`, `IOCTL_SERIAL_GET_COMMCONFIG`,
   and `IOCTL_SERIAL_SET_COMMCONFIG` with a minimal RS232 `SERIALCONFIG` and no
   provider-specific data.
+- The driver validates `IOCTL_SERIAL_SET_QUEUE_SIZE` against fixed virtual
+  queue capacities and accepts UART FIFO/default-configuration requests as
+  no-op compatibility calls.
 - `IOCTL_SERIAL_IMMEDIATE_CHAR` is delivered as a one-byte TxData event ahead
   of queued TX ring-buffer bytes, using the same RFC2217 serial-data path and
   IAC escaping as normal writes.

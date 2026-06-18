@@ -273,6 +273,17 @@ minimal shape and leaves baud-rate, line-control, and handflow state to their
 dedicated serial IOCTLs so those changes continue to generate RFC2217 control
 events.
 
+## Queue And UART Configuration
+
+`IOCTL_SERIAL_SET_QUEUE_SIZE` validates the requested `SERIAL_QUEUE_SIZE`
+against the fixed virtual RX/TX queue capacities. Requests larger than the
+driver's current 4096-byte RX or TX queues fail with
+`STATUS_INSUFFICIENT_RESOURCES`; accepted requests do not reallocate the fixed
+buffers. Hardware UART configuration requests with no RFC2217 equivalent,
+`IOCTL_SERIAL_SET_FIFO_CONTROL` and
+`IOCTL_SERIAL_APPLY_DEFAULT_CONFIGURATION`, are accepted as no-op compatibility
+requests.
+
 ## Immediate Transmit
 
 `IOCTL_SERIAL_IMMEDIATE_CHAR` accepts one byte from the serial client and
