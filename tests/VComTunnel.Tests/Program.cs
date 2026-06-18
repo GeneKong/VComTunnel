@@ -411,6 +411,7 @@ static void Rfc2217AckSemantics()
     AssertTrue(
         expectedBaud.IsSameCommand(new Rfc2217Notification(Rfc2217Client.AckSetBaudRate, [0x00, 0x00, 0x25, 0x80])),
         "Different ACK value for the same command should be distinguishable as a rejection.");
+    AssertEqual("2000", Rfc2217Client.RecommendedCommandAckTimeout.TotalMilliseconds.ToString("0"));
     var acceptedBaud = new Rfc2217ExpectedAck(
         Rfc2217Client.AckSetBaudRate,
         [0x00, 0x01, 0xC2, 0x00],

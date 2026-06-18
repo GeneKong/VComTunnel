@@ -4,6 +4,8 @@ namespace VComTunnel.Core;
 
 public sealed class Rfc2217Client
 {
+    public static readonly TimeSpan RecommendedCommandAckTimeout = TimeSpan.FromSeconds(2);
+
     public const byte Signature = 0;
     public const byte AckSetBaudRate = 101;
     public const byte AckSetDataSize = 102;

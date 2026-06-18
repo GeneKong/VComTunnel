@@ -37,7 +37,7 @@ public sealed class KmdfTunnelSession : IDisposable
     private const ushort ProtocolMinor = 1;
     private const int MaxEventBytes = 4096;
     private const int MaxRxBytes = 4096;
-    private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan CommandAckTimeout = Rfc2217Client.RecommendedCommandAckTimeout;
     private static readonly TimeSpan RxBackpressureRetryInterval = TimeSpan.FromMilliseconds(25);
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan KeepAlivePollInterval = TimeSpan.FromSeconds(5);

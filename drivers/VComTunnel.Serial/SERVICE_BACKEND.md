@@ -81,9 +81,9 @@ Current implementation note:
   stop-size, DTR/RTS, BREAK, flow-control, purge, NOTIFY-LINESTATE, and
   NOTIFY-MODEMSTATE.
 - RFC2217 command ACK correlation is implemented for outbound serial controls.
-  The service waits for the expected ACK command, retries once on timeout, and
-  faults the tunnel if the peer rejects strict control/purge values or does not
-  acknowledge after retry.
+  The service waits up to 2 seconds for the expected ACK command, retries once
+  on timeout, and faults the tunnel if the peer rejects strict control/purge
+  values or does not acknowledge after retry.
 - Server-to-client accepted baud/data/parity/stop settings update the driver's
   cached serial settings even when they complete a pending ACK wait, matching
   hub4com's COM-PORT-OPTION client behavior.
