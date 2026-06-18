@@ -57,6 +57,8 @@
                 <MenuItem x:Name="PortsMenuItem" Header="Ports" Click="Ports_Click"/>
                 <MenuItem x:Name="CreatePairMenuItem" Header="Create pair" Click="CreatePair_Click"/>
                 <MenuItem x:Name="DeletePairMenuItem" Header="Delete pair" Click="DeletePair_Click"/>
+                <Separator/>
+                <MenuItem x:Name="UpdateKmdfDriverMenuItem" Header="Update KMDF driver" Click="UpdateKmdfDriver_Click"/>
             </MenuItem>
             <MenuItem x:Name="ToolsMenuItem" Header="Tools">
                 <MenuItem x:Name="SetupDepsMenuItem" Header="Setup deps" Click="SetupDeps_Click"/>

@@ -240,6 +240,22 @@ internal static class VComTunnelHost
             return Results.BadRequest(result);
         });
 
+        app.MapPost("/api/kmdf/ports/update", (
+            KmdfPortRequest request,
+            KmdfDeviceManager devices,
+            InMemoryLog log) =>
+        {
+            var result = devices.UpdatePort(request);
+            if (result.Success)
+            {
+                log.Info("kmdf", result.Message);
+                return Results.Ok(result);
+            }
+
+            log.Error("kmdf", result.Message);
+            return Results.BadRequest(result);
+        });
+
         await app.RunAsync(cancellationToken);
     }
 }

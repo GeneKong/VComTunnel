@@ -159,11 +159,14 @@ public sealed class TunnelOrchestrator
 
     public TunnelStatus Stop(string id)
     {
+        var mapping = _tunnels.TryGetValue(id, out var existing)
+            ? existing.Mapping
+            : new TunnelMapping { Id = id };
         StopExisting(id);
         _lastProcessErrors.TryRemove(id, out _);
-        var stopped = new ManagedTunnel(new TunnelMapping { Id = id }, TunnelRunState.Stopped, null, null, null, null);
+        var stopped = new ManagedTunnel(mapping, TunnelRunState.Stopped, null, null, null, null);
         _tunnels[id] = stopped;
-        _log.Info(id, "Stopped.");
+        _log.Info(mapping.Name, "Stopped.");
         return stopped.ToStatus();
     }
 

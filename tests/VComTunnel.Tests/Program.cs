@@ -850,6 +850,9 @@ static async Task KmdfPermanentDriverFaultDoesNotRestartAsync()
     var first = await orchestrator.StartAsync(id);
     AssertEqual(TunnelRunState.Faulted.ToString(), first.State.ToString());
     AssertStringContains(first.LastError ?? "", "driver protocol");
+    var stopped = orchestrator.Stop(id);
+    AssertEqual(TunnelRunState.Stopped.ToString(), stopped.State.ToString());
+    AssertEqual("Kmdf", stopped.Backend);
 
     await Task.Delay(150);
 

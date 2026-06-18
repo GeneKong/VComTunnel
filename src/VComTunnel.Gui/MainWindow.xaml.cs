@@ -98,6 +98,7 @@ public partial class MainWindow : Window
         SetCommandMenuItem(PortsMenuItem, PackIconMaterialKind.FormatListBulleted, "Action.Ports");
         SetCommandMenuItem(CreatePairMenuItem, PackIconMaterialKind.Link, "Action.CreatePair");
         SetCommandMenuItem(DeletePairMenuItem, PackIconMaterialKind.DeleteOutline, "Action.DeletePair");
+        SetCommandMenuItem(UpdateKmdfDriverMenuItem, PackIconMaterialKind.Upload, "Action.UpdateKmdfDriver");
         SetCommandMenuItem(SetupDepsMenuItem, PackIconMaterialKind.Cog, "Action.SetupDeps");
         SetCommandMenuItem(ClearLogsMenuItem, PackIconMaterialKind.Broom, "Action.ClearLogs");
         SetCommandMenuItem(StartMappingMenuItem, PackIconMaterialKind.Play, "Action.Start");
@@ -177,6 +178,7 @@ public partial class MainWindow : Window
     private async void Ports_Click(object sender, RoutedEventArgs e) => await ShowCom0comPairsAsync();
     private async void CreatePair_Click(object sender, RoutedEventArgs e) => await CreatePairForSelectedAsync();
     private async void DeletePair_Click(object sender, RoutedEventArgs e) => await DeletePairForSelectedAsync();
+    private async void UpdateKmdfDriver_Click(object sender, RoutedEventArgs e) => await UpdateKmdfDriverForSelectionAsync(confirm: true);
     private async void DeleteMapping_Click(object sender, RoutedEventArgs e) => await DeleteSelectedMappingAsync();
     private async void ClearLogs_Click(object sender, RoutedEventArgs e) => await ClearLogsAsync();
 
@@ -308,12 +310,14 @@ public partial class MainWindow : Window
         var canStop = row?.CanStop == true;
         var canUseMapping = row is not null;
         var canUsePort = row is not null || port is not null;
+        var canUpdateKmdf = row?.IsKmdf == true || port?.IsKmdf == true;
 
         DeleteMappingButton.IsEnabled = canUseMapping;
         DeleteMappingMenuItem.IsEnabled = canUseMapping;
         DeleteSelectedMappingMenuItem.IsEnabled = canUseMapping;
         CreatePairMenuItem.IsEnabled = canUseMapping;
         DeletePairMenuItem.IsEnabled = canUsePort;
+        UpdateKmdfDriverMenuItem.IsEnabled = canUpdateKmdf;
         StartButton.IsEnabled = canStart;
         StopButton.IsEnabled = canStop;
         StartMappingCommandMenuItem.IsEnabled = canStart;
@@ -898,7 +902,7 @@ public partial class MainWindow : Window
         await PostMappingAsync(row, action);
     }
 
-    private async Task PostMappingAsync(MappingRow row, string action)
+    private async Task PostMappingAsync(MappingRow row, string action, bool allowKmdfDriverRepair = true)
     {
         var actionLabel = ActionLabel(action);
         try
@@ -934,6 +938,14 @@ public partial class MainWindow : Window
             AppendGuiLog("debug", T("Log.Api"), responseBody);
             await RefreshMappingStatesAsync();
             await RefreshLogsAsync();
+            if (allowKmdfDriverRepair
+                && string.Equals(action, "start", StringComparison.OrdinalIgnoreCase)
+                && row.IsKmdf
+                && TryReadTunnelLastError(responseBody, out var lastError)
+                && IsKmdfProtocolMismatch(lastError))
+            {
+                await PromptUpdateKmdfDriverAfterProtocolFaultAsync(row, lastError);
+            }
         }
         catch (Exception ex)
         {
@@ -1350,6 +1362,95 @@ public partial class MainWindow : Window
         return false;
     }
 
+    private async Task UpdateKmdfDriverForSelectionAsync(bool confirm)
+    {
+        var portName = GetSelectedKmdfPortName();
+        if (string.IsNullOrWhiteSpace(portName))
+        {
+            SetStatus(T("Status.SelectKmdfPortFirst"), "warn");
+            return;
+        }
+
+        await UpdateKmdfDriverAsync(portName, confirm);
+    }
+
+    private string? GetSelectedKmdfPortName()
+    {
+        if (MappingsGrid.SelectedItem is MappingRow { IsKmdf: true } row)
+        {
+            return row.VisiblePort;
+        }
+
+        if (ComPairsList.SelectedItem is ComPairRow { IsKmdf: true } port)
+        {
+            return port.Port;
+        }
+
+        return null;
+    }
+
+    private async Task PromptUpdateKmdfDriverAfterProtocolFaultAsync(MappingRow row, string lastError)
+    {
+        var answer = MessageBox.Show(
+            TF("Prompt.UpdateKmdfDriverAfterFault", row.VisiblePort, lastError),
+            T("Title.KmdfPort"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+        if (answer != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        if (await UpdateKmdfDriverAsync(row.VisiblePort, confirm: false))
+        {
+            SetStatus(TF("Status.KmdfDriverUpdatedRetrying", row.VisiblePort));
+            await PostMappingAsync(row, "start", allowKmdfDriverRepair: false);
+        }
+    }
+
+    private async Task<bool> UpdateKmdfDriverAsync(string portName, bool confirm)
+    {
+        var normalizedPortName = KmdfDeviceManager.NormalizePortName(portName);
+        if (confirm)
+        {
+            var answer = MessageBox.Show(
+                TF("Prompt.UpdateKmdfDriver", normalizedPortName),
+                T("Title.KmdfPort"),
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+            if (answer != MessageBoxResult.Yes)
+            {
+                return false;
+            }
+        }
+
+        var operation = LaunchKmdfCtl("update", normalizedPortName);
+        if (operation is null)
+        {
+            return false;
+        }
+
+        SetStatus(TF("Status.WaitingKmdfDriverUpdate", normalizedPortName));
+        var result = await WaitForKmdfCtlResultAsync(operation, TimeSpan.FromSeconds(90));
+        if (result is null)
+        {
+            SetStatus(T("Status.KmdfCtlNoResult"), "warn");
+            return false;
+        }
+
+        if (!result.Success)
+        {
+            AppendGuiLog("error", T("Log.Gui"), result.Message);
+            SetStatus(TF("Status.KmdfCtlOperationFailed", CollapseWhitespace(result.Message)), "error");
+            return false;
+        }
+
+        AppendGuiLog("info", T("Log.Gui"), result.Message);
+        await RefreshComPairsListAsync(updateDetails: true);
+        SetStatus(TF("Status.KmdfDriverUpdated", normalizedPortName));
+        return true;
+    }
+
     private async Task<bool> EnsureKmdfPortExistsBeforeStartAsync(MappingRow row)
     {
         var devices = await GetKmdfDevicesAsync();
@@ -1470,6 +1571,21 @@ public partial class MainWindow : Window
         }
 
         return new KmdfWaitResult(false, TF("Status.KmdfCtlNoPortAfterSuccess", CollapseWhitespace(lastOperationMessage)));
+    }
+
+    private async Task<KmdfCtlResult?> WaitForKmdfCtlResultAsync(KmdfCtlLaunch operation, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            if (TryReadKmdfCtlResult(operation.ResultFile, out var result))
+            {
+                return result;
+            }
+        }
+
+        return null;
     }
 
     private static string QuoteProcessArgument(string value) =>
@@ -2019,6 +2135,30 @@ public partial class MainWindow : Window
             return $"{actionLabel}: {(int)response.StatusCode}";
         }
     }
+
+    private static bool TryReadTunnelLastError(string responseBody, out string lastError)
+    {
+        lastError = "";
+        try
+        {
+            using var document = JsonDocument.Parse(responseBody);
+            if (document.RootElement.TryGetProperty("lastError", out var errorElement)
+                && errorElement.ValueKind != JsonValueKind.Null)
+            {
+                lastError = errorElement.GetString() ?? "";
+                return !string.IsNullOrWhiteSpace(lastError);
+            }
+        }
+        catch
+        {
+        }
+
+        return false;
+    }
+
+    private static bool IsKmdfProtocolMismatch(string error) =>
+        error.Contains("KMDF driver protocol", StringComparison.OrdinalIgnoreCase)
+        && error.Contains("older than required", StringComparison.OrdinalIgnoreCase);
 
     private static string ExtractError(string responseBody)
     {

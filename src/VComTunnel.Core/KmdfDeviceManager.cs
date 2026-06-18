@@ -128,6 +128,50 @@ public sealed class KmdfDeviceManager
         return new KmdfPortOperationResult(true, $"Removed {device.PortName}.", device, false);
     }
 
+    public KmdfPortOperationResult UpdatePort(KmdfPortRequest request)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return Fail("KMDF port management is only available on Windows.");
+        }
+
+        if (!IsAdministrator())
+        {
+            return Fail("Update KMDF driver requires administrator privileges. Approve the UAC prompt and retry.");
+        }
+
+        var devices = GetDevices();
+        var device = !string.IsNullOrWhiteSpace(request.InstanceId)
+            ? devices.FirstOrDefault(candidate => string.Equals(candidate.InstanceId, request.InstanceId, StringComparison.OrdinalIgnoreCase))
+            : devices.FirstOrDefault(candidate => PortEquals(candidate.PortName, NormalizePortName(request.PortName)));
+
+        if (device is null)
+        {
+            return Fail("KMDF port was not found.");
+        }
+
+        var infPath = ResolveDriverInfPath(request.InfPath);
+        if (infPath is null)
+        {
+            return Fail("VComTunnel.Serial install package was not found. Build the KMDF driver first.");
+        }
+
+        try
+        {
+            var rebootRequired = InstallDriverForDevice(infPath);
+            RestartDevice(device.InstanceId);
+            var updated = GetDevices().FirstOrDefault(candidate => string.Equals(candidate.InstanceId, device.InstanceId, StringComparison.OrdinalIgnoreCase))
+                ?? GetDevices().FirstOrDefault(candidate => PortEquals(candidate.PortName, device.PortName))
+                ?? device;
+
+            return new KmdfPortOperationResult(true, $"Updated {updated.PortName} driver from {Path.GetFileName(infPath)}.", updated, rebootRequired);
+        }
+        catch (Exception ex)
+        {
+            return Fail($"Update {device.PortName} failed: {ex.Message}");
+        }
+    }
+
     public static IReadOnlyList<KmdfDeviceInfo> ParsePnpUtilDevicesCsv(string csv)
     {
         var lines = csv.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);

@@ -185,6 +185,7 @@ internal static class VComTunnelCtl
             "list" => ListKmdfPorts(manager),
             "add" => AddKmdfPort(manager, options.Positionals.Skip(1).FirstOrDefault(), options.Positionals.Skip(2).FirstOrDefault(), options.ResultFile),
             "remove" => RemoveKmdfPort(manager, options.Positionals.Skip(1).FirstOrDefault(), options.ResultFile),
+            "update" => UpdateKmdfPort(manager, options.Positionals.Skip(1).FirstOrDefault(), options.Positionals.Skip(2).FirstOrDefault(), options.ResultFile),
             "inf" => PrintKmdfInf(options.Positionals.Skip(1).FirstOrDefault()),
             _ => KmdfHelp()
         };
@@ -240,6 +241,20 @@ internal static class VComTunnelCtl
         }
 
         var result = manager.RemovePort(new KmdfPortRequest(portName));
+        return CompleteKmdfResult(result, resultFile);
+    }
+
+    private static int UpdateKmdfPort(KmdfDeviceManager manager, string? portName, string? infPath, string? resultFile)
+    {
+        if (string.IsNullOrWhiteSpace(portName))
+        {
+            const string usage = "Usage: vcomtunnelctl kmdf update COM27 [driver-inf]";
+            Console.WriteLine(usage);
+            WriteKmdfResultFile(resultFile, false, usage);
+            return 2;
+        }
+
+        var result = manager.UpdatePort(new KmdfPortRequest(portName, InfPath: infPath));
         return CompleteKmdfResult(result, resultFile);
     }
 
@@ -447,6 +462,7 @@ internal static class VComTunnelCtl
           kmdf list                List VComTunnel KMDF COM ports
           kmdf add COMx [inf]      Create a KMDF COM port with administrator approval
           kmdf remove COMx         Remove a KMDF COM port with administrator approval
+          kmdf update COMx [inf]   Update an existing KMDF COM port driver
           start <mappingId>        Start one configured mapping
           stop <mappingId>         Stop one configured mapping
           logs                     Read /api/logs from the local service
@@ -477,7 +493,7 @@ internal static class VComTunnelCtl
 
     private static int KmdfHelp()
     {
-        Console.WriteLine("Usage: vcomtunnelctl kmdf list | add COM27 [driver-inf] | remove COM27 | inf [driver-inf]");
+        Console.WriteLine("Usage: vcomtunnelctl kmdf list | add COM27 [driver-inf] | remove COM27 | update COM27 [driver-inf] | inf [driver-inf]");
         return 0;
     }
 
