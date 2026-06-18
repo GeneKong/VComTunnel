@@ -178,7 +178,7 @@
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
                         <DataGridTextColumn x:Name="NameColumn" Header="Name" Binding="{Binding Name}" Width="Auto" MinWidth="120"/>
-                        <DataGridComboBoxColumn x:Name="BackendColumn" Header="Backend" SelectedItemBinding="{Binding Backend}" Width="Auto" MinWidth="150">
+                        <DataGridComboBoxColumn x:Name="BackendColumn" Header="Backend" SelectedItemBinding="{Binding Backend, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="Auto" MinWidth="150">
                             <DataGridComboBoxColumn.ItemsSource>
                                 <x:Array Type="{x:Type sys:String}">
                                     <sys:String>com0comHub4com</sys:String>

@@ -162,6 +162,7 @@ internal static class GuiText
         ["Log.DependenciesReady"] = "Dependencies ready.",
         ["Log.DependenciesDownloadedNeedInstall"] = "Dependencies prepared. com0com driver install is still required.",
         ["Log.BackingChanged"] = "{0}: Backing cannot equal Visible; changed backing to {1}.",
+        ["Log.KmdfBackingCleared"] = "{0}: KMDF mappings do not use Backing; cleared it.",
         ["Msg.Yes"] = "Yes",
         ["Msg.No"] = "No"
     };
@@ -317,6 +318,7 @@ internal static class GuiText
         ["Log.DependenciesReady"] = "依赖已就绪。",
         ["Log.DependenciesDownloadedNeedInstall"] = "依赖包已准备好，仍需安装 com0com 驱动。",
         ["Log.BackingChanged"] = "{0}：后端口不能等于可见端口，已改为 {1}。",
+        ["Log.KmdfBackingCleared"] = "{0}：KMDF 映射不使用后端口，已清空。",
         ["Msg.Yes"] = "是",
         ["Msg.No"] = "否"
     };

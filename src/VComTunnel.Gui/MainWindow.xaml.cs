@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -1199,6 +1200,14 @@ public partial class MainWindow : Window
 
     private void NormalizeRowsBeforeSave()
     {
+        foreach (var row in _mappings.Where(row => row.IsKmdf))
+        {
+            if (row.ClearBackingPort())
+            {
+                AppendGuiLog("info", T("Log.Gui"), TF("Log.KmdfBackingCleared", row.Name));
+            }
+        }
+
         foreach (var row in _mappings.Where(row => !row.IsKmdf))
         {
             if (string.Equals(row.VisiblePort, row.BackingPort, StringComparison.OrdinalIgnoreCase)
@@ -1610,19 +1619,91 @@ public partial class MainWindow : Window
     }
 }
 
-public sealed class MappingRow
+public sealed class MappingRow : INotifyPropertyChanged
 {
+    private string _backend = "com0comHub4com";
+    private string? _backingPort;
+    private TunnelRunState _runState = TunnelRunState.Stopped;
+    private string _stateLabel = "";
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
     public string Id { get; set; } = Guid.NewGuid().ToString("n");
     public string Name { get; set; } = "";
-    public string Backend { get; set; } = "com0comHub4com";
+
+    public string Backend
+    {
+        get => _backend;
+        set
+        {
+            var normalized = string.Equals(value, "kmdf", StringComparison.OrdinalIgnoreCase)
+                ? "kmdf"
+                : "com0comHub4com";
+            if (string.Equals(_backend, normalized, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _backend = normalized;
+            OnPropertyChanged(nameof(Backend));
+            OnPropertyChanged(nameof(IsKmdf));
+
+            if (IsKmdf && !string.IsNullOrWhiteSpace(_backingPort))
+            {
+                ClearBackingPort();
+            }
+        }
+    }
+
     public string VisiblePort { get; set; } = "";
-    public string? BackingPort { get; set; }
+
+    public string? BackingPort
+    {
+        get => IsKmdf ? null : _backingPort;
+        set
+        {
+            var normalized = IsKmdf ? null : value;
+            SetBackingPort(normalized);
+        }
+    }
+
     public string Host { get; set; } = "";
     public int Port { get; set; }
     public bool AutoStart { get; set; }
     public bool RestartOnFailure { get; set; } = true;
-    public TunnelRunState RunState { get; set; } = TunnelRunState.Stopped;
-    public string StateLabel { get; set; } = "";
+
+    public TunnelRunState RunState
+    {
+        get => _runState;
+        set
+        {
+            if (_runState == value)
+            {
+                return;
+            }
+
+            _runState = value;
+            OnPropertyChanged(nameof(RunState));
+            OnPropertyChanged(nameof(CanStart));
+            OnPropertyChanged(nameof(CanStop));
+        }
+    }
+
+    public string StateLabel
+    {
+        get => _stateLabel;
+        set
+        {
+            if (string.Equals(_stateLabel, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _stateLabel = value;
+            OnPropertyChanged(nameof(StateLabel));
+        }
+    }
+
     public bool IsKmdf => string.Equals(Backend, "kmdf", StringComparison.OrdinalIgnoreCase);
     public bool CanStart => RunState is not TunnelRunState.Running and not TunnelRunState.Starting and not TunnelRunState.Unsupported;
     public bool CanStop => RunState is TunnelRunState.Running or TunnelRunState.Starting;
@@ -1662,6 +1743,23 @@ public sealed class MappingRow
             AutoStart = AutoStart,
             RestartOnFailure = RestartOnFailure
         };
+    }
+
+    private void OnPropertyChanged(string propertyName) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+    public bool ClearBackingPort() => SetBackingPort(null);
+
+    private bool SetBackingPort(string? value)
+    {
+        if (string.Equals(_backingPort, value, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        _backingPort = value;
+        OnPropertyChanged(nameof(BackingPort));
+        return true;
     }
 }
 
