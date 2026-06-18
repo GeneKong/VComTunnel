@@ -928,7 +928,9 @@ internal sealed record SmokeOptions(
 {
     public static SmokeOptions Parse(string[] args)
     {
-        var probeOnly = args.Any(arg => string.Equals(arg, "--probe-rfc2217", StringComparison.OrdinalIgnoreCase));
+        var probeOnly = args.Any(arg =>
+            string.Equals(arg, "--probe-rfc2217", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(arg, "--probe-only", StringComparison.OrdinalIgnoreCase));
         var probeQuery = args.Any(arg => string.Equals(arg, "--probe-query", StringComparison.OrdinalIgnoreCase));
         var probeSettings = args.Any(arg => string.Equals(arg, "--probe-settings", StringComparison.OrdinalIgnoreCase));
         var probeControls = args.Any(arg => string.Equals(arg, "--probe-controls", StringComparison.OrdinalIgnoreCase));

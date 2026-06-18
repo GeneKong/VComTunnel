@@ -45,6 +45,7 @@ RFC2217 endpoint directly without opening a COM port:
 dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -- --probe-rfc2217 10.0.2.196 5000
 ```
 
+`--probe-only` is accepted as an alias for `--probe-rfc2217`.
 Add `--probe-settings` to also verify baud-rate and 8N1 line-control ACKs
 without toggling DTR, RTS, BREAK, or purge state.
 Add `--probe-query` to ask the endpoint for current baud, line-control, flow,
