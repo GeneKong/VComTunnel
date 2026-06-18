@@ -192,9 +192,9 @@ diagnostics. It must not reconnect by itself.
 ## Remote Accepted Settings
 
 RFC2217 server-to-client `SET-BAUDRATE`, `SET-DATASIZE`, `SET-PARITY`, and
-`SET-STOPSIZE` responses are also the server's accepted serial settings. When
-one of those commands is not consumed by a pending outbound ACK wait, the
-service updates the driver's cached settings:
+`SET-STOPSIZE` responses are also the server's accepted serial settings. The
+service updates the driver's cached settings for those responses, including
+when the response completes a pending outbound ACK wait:
 
 ```c
 #define VCOMTUNNEL_REMOTE_BAUD_RATE   0x00000001

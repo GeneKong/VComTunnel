@@ -266,6 +266,26 @@ public sealed class Rfc2217Client
             or AckPurgeData;
     }
 
+    public static bool IsAcceptedSerialSettingAck(byte command)
+    {
+        return command is AckSetBaudRate
+            or AckSetDataSize
+            or AckSetParity
+            or AckSetStopSize;
+    }
+
+    public static bool IsAcceptedSerialSetting(Rfc2217Notification notification)
+    {
+        if (!IsAcceptedSerialSettingAck(notification.Command))
+        {
+            return false;
+        }
+
+        return notification.Command == AckSetBaudRate
+            ? notification.Payload.Length == 4 && ReadUInt32Payload(notification.Payload) != 0
+            : notification.Payload.Length == 1 && notification.Payload[0] != 0;
+    }
+
     public static bool IsFlowControlCommand(byte command)
     {
         return command is FlowControlSuspend or FlowControlResume;
@@ -328,6 +348,19 @@ public sealed class Rfc2217Client
             (byte)(value >> 8),
             (byte)value
         ];
+    }
+
+    public static uint ReadUInt32Payload(byte[] value)
+    {
+        if (value.Length < 4)
+        {
+            return 0;
+        }
+
+        return ((uint)value[0] << 24)
+            | ((uint)value[1] << 16)
+            | ((uint)value[2] << 8)
+            | value[3];
     }
 
     public static byte MapOutboundFlowControl(uint controlHandshake, uint flowReplace)
@@ -522,7 +555,11 @@ public sealed record Rfc2217Frame(byte[] SerialData, byte[] Replies, IReadOnlyLi
 
 public sealed record Rfc2217Notification(byte Command, byte[] Payload);
 
-public sealed record Rfc2217ExpectedAck(byte Command, byte[] Payload, bool AllowPayloadBitSubset = false)
+public sealed record Rfc2217ExpectedAck(
+    byte Command,
+    byte[] Payload,
+    bool AllowPayloadBitSubset = false,
+    bool AllowAcceptedValue = false)
 {
     public bool Matches(Rfc2217Notification notification)
     {
@@ -544,6 +581,13 @@ public sealed record Rfc2217ExpectedAck(byte Command, byte[] Payload, bool Allow
     public bool IsSameCommand(Rfc2217Notification notification)
     {
         return notification.Command == Command;
+    }
+
+    public bool MatchesAcceptedValue(Rfc2217Notification notification)
+    {
+        return AllowAcceptedValue
+            && notification.Command == Command
+            && Rfc2217Client.IsAcceptedSerialSetting(notification);
     }
 
     public string Describe()

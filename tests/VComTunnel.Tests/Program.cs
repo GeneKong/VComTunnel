@@ -291,6 +291,25 @@ static void Rfc2217AckSemantics()
     AssertTrue(
         expectedBaud.IsSameCommand(new Rfc2217Notification(Rfc2217Client.AckSetBaudRate, [0x00, 0x00, 0x25, 0x80])),
         "Different ACK value for the same command should be distinguishable as a rejection.");
+    var acceptedBaud = new Rfc2217ExpectedAck(
+        Rfc2217Client.AckSetBaudRate,
+        [0x00, 0x01, 0xC2, 0x00],
+        AllowAcceptedValue: true);
+    AssertTrue(
+        acceptedBaud.MatchesAcceptedValue(new Rfc2217Notification(Rfc2217Client.AckSetBaudRate, [0x00, 0x00, 0x25, 0x80])),
+        "Baud ACK can carry the remote accepted value.");
+    AssertEqual("9600", Rfc2217Client.ReadUInt32Payload([0x00, 0x00, 0x25, 0x80]).ToString());
+    AssertTrue(
+        !acceptedBaud.MatchesAcceptedValue(new Rfc2217Notification(Rfc2217Client.AckSetBaudRate, [0x00, 0x00, 0x00, 0x00])),
+        "Zero baud is not a valid accepted setting.");
+    AssertTrue(
+        new Rfc2217ExpectedAck(Rfc2217Client.AckSetParity, [1], AllowAcceptedValue: true)
+            .MatchesAcceptedValue(new Rfc2217Notification(Rfc2217Client.AckSetParity, [3])),
+        "Line-control ACK can carry the remote accepted value.");
+    AssertTrue(
+        !new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [8], AllowAcceptedValue: true)
+            .MatchesAcceptedValue(new Rfc2217Notification(Rfc2217Client.AckSetControl, [9])),
+        "SET-CONTROL is not relaxed as a remote serial setting.");
     AssertEqual("17", Rfc2217Client.MapOutboundFlowControl(0x20, 0).ToString());
     AssertEqual("18", Rfc2217Client.MapInboundFlowControl(0x02, 0).ToString());
     AssertEqual("3", Rfc2217Client.MapPurge(0x0C).ToString());
