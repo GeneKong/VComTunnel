@@ -332,7 +332,8 @@ static async Task KmdfMappingReportsStartupFaultAsync()
         Name = "Driver",
         Backend = TunnelBackend.Kmdf,
         VisiblePort = "COM44",
-        BackingPort = null
+        BackingPort = null,
+        RestartOnFailure = false
     };
     var store = await StoreWithMappingAsync(temp.Path, mapping);
     var orchestrator = CreateOrchestrator(store, new DependencyDetector([temp.Path], pathOverride: ""), new InMemoryLog());

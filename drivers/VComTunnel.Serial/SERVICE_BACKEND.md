@@ -90,6 +90,9 @@ Current implementation note:
   until FLOWCONTROL-RESUME is received.
 - TCP writes are serialized across driver events, Telnet negotiation replies,
   and idle keep-alive. Idle RFC2217 sessions send Telnet NOP every 30 seconds.
+- Startup connection failures and runtime network drops feed the same
+  `RestartOnFailure` policy. Manual Stop invalidates delayed restarts so a
+  stopped mapping stays stopped.
 - Wait-mask notifications currently cover RXCHAR, CTS, DSR, RLSD, RING, BREAK,
   and ERR events raised by received bytes or RFC2217 modem/line notifications.
 - Remaining hardening: additional serial events beyond the current wait-mask
@@ -118,6 +121,9 @@ If any step fails, return `TunnelStatus.Faulted` with the most concrete reason:
 - protocol mismatch
 - visible COM mismatch
 - RFC2217 connection failed
+
+If `RestartOnFailure` is enabled, transient RFC2217 connection failures are
+scheduled for restart instead of requiring another manual Start.
 
 ## Stop Flow
 

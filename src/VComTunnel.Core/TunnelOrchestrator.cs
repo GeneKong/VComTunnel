@@ -12,6 +12,7 @@ public sealed class TunnelOrchestrator
     private readonly InMemoryLog _log;
     private readonly ConcurrentDictionary<string, ManagedTunnel> _tunnels = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _lastProcessErrors = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, long> _restartVersions = new(StringComparer.OrdinalIgnoreCase);
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
     public TunnelOrchestrator(
@@ -179,6 +180,7 @@ public sealed class TunnelOrchestrator
             var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, ex.Message);
             _tunnels[mapping.Id] = faulted;
             _log.Error(mapping.Name, ex.Message);
+            ScheduleKmdfRestart(mapping, ex.Message);
             return faulted.ToStatus();
         }
     }
@@ -186,15 +188,26 @@ public sealed class TunnelOrchestrator
     private void OnKmdfFaulted(TunnelMapping mapping, KmdfTunnelSession session, string error)
     {
         _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, error);
+        ScheduleKmdfRestart(mapping, error);
+    }
 
-        if (!mapping.RestartOnFailure)
+    private void ScheduleKmdfRestart(TunnelMapping mapping, string error)
+    {
+        if (!mapping.RestartOnFailure || IsPermanentKmdfError(error))
         {
             return;
         }
 
+        var restartVersion = GetRestartVersion(mapping.Id);
+        _log.Warn(mapping.Name, $"Scheduling KMDF restart in 2 seconds after: {error}");
         _ = Task.Run(async () =>
         {
             await Task.Delay(TimeSpan.FromSeconds(2));
+            if (GetRestartVersion(mapping.Id) != restartVersion)
+            {
+                return;
+            }
+
             try
             {
                 await StartAsync(mapping.Id);
@@ -208,6 +221,7 @@ public sealed class TunnelOrchestrator
 
     private void StopExisting(string id)
     {
+        BumpRestartVersion(id);
         StopProcess(id);
         StopKmdf(id);
     }
@@ -258,9 +272,15 @@ public sealed class TunnelOrchestrator
             return;
         }
 
+        var restartVersion = GetRestartVersion(mapping.Id);
         _ = Task.Run(async () =>
         {
             await Task.Delay(TimeSpan.FromSeconds(2));
+            if (GetRestartVersion(mapping.Id) != restartVersion)
+            {
+                return;
+            }
+
             try
             {
                 await StartAsync(mapping.Id);
@@ -304,6 +324,23 @@ public sealed class TunnelOrchestrator
     {
         return value.Contains("CreateFile", StringComparison.OrdinalIgnoreCase)
             && value.Contains("ERROR 2", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPermanentKmdfError(string value)
+    {
+        return value.Contains("control channel", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("ack returned unexpected value", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("only available on Windows", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private long GetRestartVersion(string id)
+    {
+        return _restartVersions.GetOrAdd(id, 0);
+    }
+
+    private void BumpRestartVersion(string id)
+    {
+        _restartVersions.AddOrUpdate(id, 1, (_, version) => version + 1);
     }
 
     private bool IsBackingPortRegistered(TunnelMapping mapping, out string? error)
