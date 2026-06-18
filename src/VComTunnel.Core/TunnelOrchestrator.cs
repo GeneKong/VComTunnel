@@ -74,6 +74,7 @@ public sealed class TunnelOrchestrator
 
         if (mapping.Backend == TunnelBackend.Kmdf)
         {
+            StopEndpointConflicts(mapping);
             return await StartKmdfAsync(mapping, cancellationToken);
         }
 
@@ -104,6 +105,7 @@ public sealed class TunnelOrchestrator
             return faulted.ToStatus();
         }
 
+        StopEndpointConflicts(mapping);
         StopExisting(id);
         _lastProcessErrors.TryRemove(id, out _);
         var command = _hub4comCommandBuilder.Build(mapping);
@@ -196,6 +198,7 @@ public sealed class TunnelOrchestrator
             return faulted.ToStatus();
         }
 
+        StopEndpointConflicts(mapping);
         StopExisting(mapping.Id);
 
         var session = _com0comServiceSessionFactory(mapping, _log, (faultedSession, error) => OnSessionFaulted(mapping, faultedSession, error));
@@ -269,6 +272,27 @@ public sealed class TunnelOrchestrator
         BumpRestartVersion(id);
         StopProcess(id);
         StopSession(id);
+    }
+
+    private void StopEndpointConflicts(TunnelMapping mapping)
+    {
+        var conflicts = _tunnels.Values
+            .Where(existing => !string.Equals(existing.Mapping.Id, mapping.Id, StringComparison.OrdinalIgnoreCase))
+            .Where(existing => UsesSameEndpoint(existing.Mapping, mapping))
+            .Where(existing => existing.ToStatus().State is not TunnelRunState.Stopped)
+            .ToArray();
+
+        foreach (var conflict in conflicts)
+        {
+            var endpoint = FormatEndpoint(mapping);
+            _log.Info(
+                mapping.Name,
+                $"Stopping {conflict.Mapping.Name} ({conflict.Mapping.VisiblePort}) before starting because both use RFC2217 endpoint {endpoint}.");
+            StopExisting(conflict.Mapping.Id);
+            _lastProcessErrors.TryRemove(conflict.Mapping.Id, out _);
+            _tunnels[conflict.Mapping.Id] = new ManagedTunnel(conflict.Mapping, TunnelRunState.Stopped, null, null, null, null);
+            _log.Info(conflict.Mapping.Name, $"Stopped because {mapping.Name} is starting for the same RFC2217 endpoint {endpoint}.");
+        }
     }
 
     private void StopProcess(string id)
@@ -395,6 +419,18 @@ public sealed class TunnelOrchestrator
             TunnelBackend.Com0comService => "com0comService",
             _ => backend.ToString()
         };
+    }
+
+    private static bool UsesSameEndpoint(TunnelMapping left, TunnelMapping right)
+    {
+        return left.Protocol == right.Protocol
+            && left.Port == right.Port
+            && string.Equals(left.Host.Trim(), right.Host.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FormatEndpoint(TunnelMapping mapping)
+    {
+        return $"{mapping.Host.Trim()}:{mapping.Port}";
     }
 
     private long GetRestartVersion(string id)
