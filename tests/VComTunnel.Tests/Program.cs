@@ -218,6 +218,9 @@ static void Rfc2217TelnetParser()
     AssertEqual("0", notify.SerialData.Length.ToString());
     AssertEqual(Rfc2217Client.NotifyModemState.ToString(), notify.Notifications.Single().Command.ToString());
     AssertBytes([0xB0], notify.Notifications.Single().Payload);
+
+    var ack = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x65, 0x00, 0x01, 0xC2, 0x00, 0xFF, 0xF0], 10);
+    AssertTrue(Rfc2217Client.IsCommandAck(ack.Notifications.Single().Command), "SET-BAUDRATE ack should be recognized.");
 }
 
 static void Com2TcpCommandUsesBatchWrapper()

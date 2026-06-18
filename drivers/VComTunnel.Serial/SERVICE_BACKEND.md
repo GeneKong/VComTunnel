@@ -80,8 +80,14 @@ Current implementation note:
   COM-PORT-OPTION negotiation, IAC escaping, baud-rate, data-size, parity,
   stop-size, DTR/RTS, BREAK, flow-control, purge, NOTIFY-LINESTATE, and
   NOTIFY-MODEMSTATE.
-- Remaining hardening: command ACK correlation, retry/timeout policy for
-  rejected RFC2217 controls, and broader wait-mask notification behavior.
+- RFC2217 command ACK correlation is implemented for outbound serial controls.
+  The service waits for the expected ACK command, retries once on timeout, then
+  logs a warning while keeping the tunnel alive.
+- Wait-mask notifications currently cover RXCHAR, CTS, DSR, RLSD, RING, BREAK,
+  and ERR events raised by received bytes or RFC2217 modem/line notifications.
+- Remaining hardening: strict failure policy for rejected or late ACKs,
+  additional serial events beyond the current wait-mask subset, and live
+  hardware/tool compatibility validation.
 
 ## Start Flow
 
@@ -142,19 +148,21 @@ TxData
 SetBaudRate / SetLineControl / SetModemControl / SetHandflow
   -> translate to RFC2217 negotiation/control
   -> complete the serial IOCTL after the driver has queued the event; service
-     currently logs RFC2217 acknowledgements but does not block on them
+     waits for the expected RFC2217 acknowledgement with a bounded timeout and
+     one retry, logging a warning if the peer still does not acknowledge
 
 Purge
-  -> translate RX/TX clear requests to RFC2217 PURGE-DATA
+  -> translate RX/TX clear requests to RFC2217 PURGE-DATA and wait for ACK
 
 SetWaitMask / CancelWaitMask
-  -> preserve state for broader wait-mask behavior
+  -> keep one pending WAIT_ON_MASK request and complete it when supported
+     RX/modem/line events intersect the active wait mask
 ```
 
 The first prototype prefers deterministic completion over perfect serial
-semantics. Completing a baud-rate request after the event is queued is
-acceptable until real hardware validation requires stricter RFC2217 ACK
-behavior.
+semantics. Driver IOCTLs complete after the event is queued to the service; the
+service applies RFC2217 ACK wait/retry policy independently so a slow or partial
+peer does not hang serial applications.
 
 ## State Model
 

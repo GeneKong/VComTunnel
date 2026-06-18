@@ -134,6 +134,52 @@ VctCompleteUnmarkedRequest(
     }
 }
 
+static VOID
+VctCompleteWaitMaskRequest(
+    _In_ WDFREQUEST Request,
+    _In_ ULONG EventMask,
+    _In_ BOOLEAN UnmarkCancelable
+    )
+{
+    NTSTATUS status;
+    ULONG* outputBuffer;
+
+    if (UnmarkCancelable &&
+        WdfRequestUnmarkCancelable(Request) == STATUS_CANCELLED) {
+        return;
+    }
+
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(EventMask), (PVOID*)&outputBuffer, NULL);
+    if (NT_SUCCESS(status)) {
+        *outputBuffer = EventMask;
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(EventMask));
+    } else {
+        WdfRequestComplete(Request, status);
+    }
+}
+
+static VOID
+VctSignalWaitMaskEvent(
+    _Inout_ PDEVICE_CONTEXT Context,
+    _In_ ULONG EventMask
+    )
+{
+    WDFREQUEST waitRequest = NULL;
+    ULONG matchedMask = 0;
+
+    WdfSpinLockAcquire(Context->Lock);
+    matchedMask = Context->WaitMask & EventMask;
+    if (matchedMask != 0 && Context->PendingWaitMask != NULL) {
+        waitRequest = Context->PendingWaitMask;
+        Context->PendingWaitMask = NULL;
+    }
+    WdfSpinLockRelease(Context->Lock);
+
+    if (waitRequest != NULL) {
+        VctCompleteWaitMaskRequest(waitRequest, matchedMask, TRUE);
+    }
+}
+
 static ULONG
 VctRxCopyOutLocked(
     _Inout_ PDEVICE_CONTEXT Context,
@@ -546,6 +592,10 @@ VctPushRx(
         return STATUS_BUFFER_OVERFLOW;
     }
 
+    if (pushed > 0) {
+        VctSignalWaitMaskEvent(Context, SERIAL_EV_RXCHAR);
+    }
+
     if (readRequest != NULL) {
         status = WdfRequestUnmarkCancelable(readRequest);
         if (status == STATUS_CANCELLED) {
@@ -603,6 +653,9 @@ VctEvtRequestCancel(
     if (context->PendingRead == Request) {
         context->PendingRead = NULL;
     }
+    if (context->PendingWaitMask == Request) {
+        context->PendingWaitMask = NULL;
+    }
     if (context->PendingServiceWait == Request) {
         context->PendingServiceWait = NULL;
     }
@@ -620,6 +673,7 @@ VctCancelPendingRequestsForFile(
 {
     PDEVICE_CONTEXT context;
     WDFREQUEST readRequest = NULL;
+    WDFREQUEST waitMaskRequest = NULL;
     WDFREQUEST serviceWait = NULL;
 
     context = DeviceGetContext(Device);
@@ -629,6 +683,11 @@ VctCancelPendingRequestsForFile(
         WdfRequestGetFileObject(context->PendingRead) == FileObject) {
         readRequest = context->PendingRead;
         context->PendingRead = NULL;
+    }
+    if (context->PendingWaitMask != NULL &&
+        WdfRequestGetFileObject(context->PendingWaitMask) == FileObject) {
+        waitMaskRequest = context->PendingWaitMask;
+        context->PendingWaitMask = NULL;
     }
     if (context->ServiceAttached &&
         context->ServiceFileObject == FileObject) {
@@ -645,6 +704,9 @@ VctCancelPendingRequestsForFile(
 
     if (readRequest != NULL) {
         VctCompleteUnmarkedRequest(readRequest, Status);
+    }
+    if (waitMaskRequest != NULL) {
+        VctCompleteUnmarkedRequest(waitMaskRequest, Status);
     }
     if (serviceWait != NULL) {
         VctCompleteUnmarkedRequest(serviceWait, Status);
@@ -751,7 +813,25 @@ VctEvtIoDeviceControl(
         break;
 
     case IOCTL_SERIAL_SET_WAIT_MASK:
-        status = VctCopyInputBuffer(Request, &context->WaitMask, sizeof(context->WaitMask));
+        {
+            ULONG waitMask = 0;
+            WDFREQUEST waitRequest = NULL;
+
+            status = VctCopyInputBuffer(Request, &waitMask, sizeof(waitMask));
+            if (NT_SUCCESS(status)) {
+                WdfSpinLockAcquire(context->Lock);
+                context->WaitMask = waitMask;
+                if (waitMask == 0 && context->PendingWaitMask != NULL) {
+                    waitRequest = context->PendingWaitMask;
+                    context->PendingWaitMask = NULL;
+                }
+                WdfSpinLockRelease(context->Lock);
+
+                if (waitRequest != NULL) {
+                    VctCompleteWaitMaskRequest(waitRequest, 0, TRUE);
+                }
+            }
+        }
         break;
 
     case IOCTL_SERIAL_GET_WAIT_MASK:
@@ -760,10 +840,42 @@ VctEvtIoDeviceControl(
 
     case IOCTL_SERIAL_WAIT_ON_MASK:
         {
-            ULONG eventMask = 0;
-            status = VctCopyOutputBuffer(Request, &eventMask, sizeof(eventMask));
+            PVOID outputBuffer;
+            WDFREQUEST oldWaitRequest = NULL;
+
+            status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ULONG), &outputBuffer, NULL);
+            if (!NT_SUCCESS(status)) {
+                break;
+            }
+            UNREFERENCED_PARAMETER(outputBuffer);
+
+            WdfSpinLockAcquire(context->Lock);
+            if (context->WaitMask == 0) {
+                WdfSpinLockRelease(context->Lock);
+                VctCompleteWaitMaskRequest(Request, 0, FALSE);
+                return;
+            }
+
+            if (context->PendingWaitMask != NULL) {
+                oldWaitRequest = context->PendingWaitMask;
+            }
+            context->PendingWaitMask = Request;
+            status = WdfRequestMarkCancelableEx(Request, VctEvtRequestCancel);
+            if (!NT_SUCCESS(status)) {
+                context->PendingWaitMask = NULL;
+            }
+            WdfSpinLockRelease(context->Lock);
+
+            if (oldWaitRequest != NULL) {
+                VctCompleteWaitMaskRequest(oldWaitRequest, 0, TRUE);
+            }
+
+            if (!NT_SUCCESS(status)) {
+                break;
+            }
+
+            return;
         }
-        break;
 
     case IOCTL_SERIAL_GET_PROPERTIES:
         status = VctCompleteCommProperties(Request);
@@ -897,10 +1009,28 @@ VctEvtIoDeviceControl(
     case IOCTL_VCOMTUNNEL_SET_MODEM_STATE:
         {
             VCT_MODEM_STATE modemState;
+            ULONG oldModemStatus;
+            ULONG eventMask = 0;
 
             status = VctCopyInputBuffer(Request, &modemState, sizeof(modemState));
             if (NT_SUCCESS(status)) {
+                oldModemStatus = context->ModemStatus;
                 context->ModemStatus = modemState.ModemStatus;
+                if ((oldModemStatus & SERIAL_CTS_STATE) != (modemState.ModemStatus & SERIAL_CTS_STATE)) {
+                    eventMask |= SERIAL_EV_CTS;
+                }
+                if ((oldModemStatus & SERIAL_DSR_STATE) != (modemState.ModemStatus & SERIAL_DSR_STATE)) {
+                    eventMask |= SERIAL_EV_DSR;
+                }
+                if ((oldModemStatus & SERIAL_DCD_STATE) != (modemState.ModemStatus & SERIAL_DCD_STATE)) {
+                    eventMask |= SERIAL_EV_RLSD;
+                }
+                if ((oldModemStatus & SERIAL_RI_STATE) != (modemState.ModemStatus & SERIAL_RI_STATE)) {
+                    eventMask |= SERIAL_EV_RING;
+                }
+                if (eventMask != 0) {
+                    VctSignalWaitMaskEvent(context, eventMask);
+                }
             }
         }
         break;
@@ -908,10 +1038,20 @@ VctEvtIoDeviceControl(
     case IOCTL_VCOMTUNNEL_SET_LINE_STATE:
         {
             VCT_LINE_STATE lineState;
+            ULONG eventMask = 0;
 
             status = VctCopyInputBuffer(Request, &lineState, sizeof(lineState));
             if (NT_SUCCESS(status)) {
                 context->LineErrors = lineState.Errors;
+                if (lineState.Errors != 0) {
+                    eventMask |= SERIAL_EV_ERR;
+                }
+                if ((lineState.Errors & SERIAL_ERROR_BREAK) != 0) {
+                    eventMask |= SERIAL_EV_BREAK;
+                }
+                if (eventMask != 0) {
+                    VctSignalWaitMaskEvent(context, eventMask);
+                }
             }
         }
         break;

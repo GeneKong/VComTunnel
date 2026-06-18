@@ -45,6 +45,7 @@ typedef struct _DEVICE_CONTEXT {
     WCHAR ControlLinkName[64];
     WCHAR PortName[32];
     WDFREQUEST PendingRead;
+    WDFREQUEST PendingWaitMask;
     WDFREQUEST PendingServiceWait;
     ULONGLONG NextSequence;
     VCOMTUNNEL_QUEUED_EVENT EventQueue[VCOMTUNNEL_EVENT_QUEUE_SIZE];

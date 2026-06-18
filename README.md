@@ -10,7 +10,7 @@ The current implementation delivers the phase 1 baseline:
 - CLI helper `vcomtunnelctl`
 - External dependency detection for `com0com`, `hub4com.exe`, and `com2tcp-rfc2217.bat`
 - Release-package bundled setup for com0com and hub4com, with download fallback for development builds
-- Experimental KMDF backend with a buildable driver skeleton and raw TCP service path
+- Experimental KMDF backend with a buildable driver and RFC2217 service path
 
 Flutter was checked first, but `flutter --version` timed out repeatedly in this environment. The GUI therefore uses the planned `.NET WPF` fallback.
 
@@ -177,6 +177,8 @@ serial tool -> COMx -> VComTunnel.Serial.sys -> VComTunnel.Service -> RFC2217
 Current status is still experimental: the WDK project produces a test-signed
 `.sys` and `.cat`, and the user-mode path now performs RFC2217/Telnet
 negotiation plus baud-rate, line-control, DTR/RTS, BREAK, flow-control, purge,
-and modem/line notification handling. Remaining hardening work is ACK/retry
-policy, broader serial wait-mask behavior, and live ESP-DAP compatibility
-validation against real tools.
+command ACK correlation with timeout/retry warnings, modem/line notification
+handling, and basic wait-mask notifications for RX, CTS, DSR, RLSD, RING,
+BREAK, and ERR events. Remaining hardening work is stricter rejected/late ACK
+failure policy, broader serial compatibility coverage, and live ESP-DAP
+compatibility validation against real tools.

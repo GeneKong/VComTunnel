@@ -2,8 +2,16 @@ namespace VComTunnel.Core;
 
 public sealed class Rfc2217Client
 {
+    public const byte AckSetBaudRate = 101;
+    public const byte AckSetDataSize = 102;
+    public const byte AckSetParity = 103;
+    public const byte AckSetStopSize = 104;
+    public const byte AckSetControl = 105;
     public const byte NotifyLineState = 106;
     public const byte NotifyModemState = 107;
+    public const byte AckSetLineStateMask = 110;
+    public const byte AckSetModemStateMask = 111;
+    public const byte AckPurgeData = 112;
 
     private const byte Iac = 255;
     private const byte Dont = 254;
@@ -223,6 +231,18 @@ public sealed class Rfc2217Client
         };
 
         return purge == 0 ? [] : BuildSubnegotiation(PurgeData, purge);
+    }
+
+    public static bool IsCommandAck(byte command)
+    {
+        return command is AckSetBaudRate
+            or AckSetDataSize
+            or AckSetParity
+            or AckSetStopSize
+            or AckSetControl
+            or AckSetLineStateMask
+            or AckSetModemStateMask
+            or AckPurgeData;
     }
 
     private static byte[] BuildSetDataSize(byte value) => BuildSubnegotiation(SetDataSize, value);
