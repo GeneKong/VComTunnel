@@ -19,6 +19,8 @@ Current status:
 - The `.NET` service and GUI still treat `kmdf` mappings as unsupported.
 - `VComTunnel.Serial.vcxproj` builds the first fixed-port KMDF prototype.
 - The driver publishes a fixed test link: `COM40`.
+- The M2 data-path skeleton supports service `ATTACH`, service `WAIT_EVENT`
+  receiving `TxData`, service `PUSH_RX`, and pending serial reads.
 - `VComTunnel.Serial.inf` is usable as the package INF after the WDK build
   produces a matching `.sys` and `.cat`.
 - `install-test-driver.ps1` refuses to install unless those package files exist.

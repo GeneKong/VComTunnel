@@ -3,14 +3,17 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <ntddser.h>
+#include <ntstrsafe.h>
 
 #include "VComTunnelIoctl.h"
 
 #define VCOMTUNNEL_DEFAULT_COM_LINK L"\\DosDevices\\COM40"
+#define VCOMTUNNEL_DEFAULT_PORT_NAME L"COM40"
 #define VCOMTUNNEL_RX_QUEUE_SIZE 4096
 #define VCOMTUNNEL_TX_QUEUE_SIZE 4096
 
 typedef struct _DEVICE_CONTEXT {
+    WDFSPINLOCK Lock;
     SERIAL_BAUD_RATE BaudRate;
     SERIAL_LINE_CONTROL LineControl;
     SERIAL_TIMEOUTS Timeouts;
@@ -20,8 +23,16 @@ typedef struct _DEVICE_CONTEXT {
     ULONG ModemStatus;
     BOOLEAN Dtr;
     BOOLEAN Rts;
+    BOOLEAN ServiceAttached;
     VCOMTUNNEL_CONNECTION_STATE ConnectionState;
     WDFQUEUE DefaultQueue;
+    WDFREQUEST PendingRead;
+    WDFREQUEST PendingServiceWait;
+    ULONGLONG NextSequence;
+    UCHAR RxBuffer[VCOMTUNNEL_RX_QUEUE_SIZE];
+    ULONG RxHead;
+    ULONG RxTail;
+    ULONG RxCount;
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, DeviceGetContext)

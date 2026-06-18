@@ -56,6 +56,11 @@ VctEvtDeviceAdd(
     context = DeviceGetContext(device);
     VctInitializeSerialDefaults(context);
 
+    status = WdfSpinLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &context->Lock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
     RtlInitUnicodeString(&comLink, VCOMTUNNEL_DEFAULT_COM_LINK);
     status = WdfDeviceCreateSymbolicLink(device, &comLink);
     if (!NT_SUCCESS(status)) {

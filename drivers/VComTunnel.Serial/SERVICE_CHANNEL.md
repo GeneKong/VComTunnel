@@ -33,13 +33,13 @@ Use a vendor device type and private function codes.
     CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x801, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
 
 #define IOCTL_VCOMTUNNEL_WAIT_EVENT \
-    CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x802, METHOD_OUT_DIRECT, FILE_READ_DATA)
+    CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x802, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
 
 #define IOCTL_VCOMTUNNEL_COMPLETE_EVENT \
     CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x803, METHOD_BUFFERED, FILE_WRITE_DATA)
 
 #define IOCTL_VCOMTUNNEL_PUSH_RX \
-    CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x804, METHOD_IN_DIRECT, FILE_WRITE_DATA)
+    CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x804, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
 
 #define IOCTL_VCOMTUNNEL_SET_CONNECTION_STATE \
     CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x805, METHOD_BUFFERED, FILE_WRITE_DATA)
@@ -48,8 +48,8 @@ Use a vendor device type and private function codes.
     CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x806, METHOD_BUFFERED, FILE_WRITE_DATA)
 ```
 
-Final function codes can change during WDK implementation, but the semantic
-split should remain.
+The M2 prototype uses `METHOD_BUFFERED` for all private IOCTLs. That keeps the
+first service implementation simple and matches the current driver header.
 
 ## Attach
 
@@ -120,7 +120,8 @@ request. Fire-and-forget state notifications can use `RequestId = 0`.
 
 ## Completing Events
 
-For events that represent serial client I/O, service replies:
+The strict protocol lets service reply for events that represent serial client
+I/O:
 
 ```c
 struct VCT_COMPLETE_EVENT {
@@ -141,6 +142,13 @@ Examples:
   - `Information = 0`
 - Request canceled before service replied:
   - Driver rejects late completion with `STATUS_NOT_FOUND`.
+
+Current M2 behavior:
+
+- `TxData` writes complete when the driver has copied bytes into a pending
+  service `WAIT_EVENT` output buffer.
+- `COMPLETE_EVENT` is reserved for the next step where write completion waits
+  for user-mode RFC2217 acceptance.
 
 ## RX Path
 
@@ -216,4 +224,3 @@ Network disconnect:
 - Service keeps channel attached.
 - Driver stays installed and openable.
 - Serial writes fail or time out according to policy until network returns.
-
