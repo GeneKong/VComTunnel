@@ -372,8 +372,9 @@ public sealed class KmdfTunnelSession : IDisposable
         }
         else if (notification.Command == Rfc2217Client.NotifyLineState)
         {
-            var input = new byte[4];
+            var input = new byte[8];
             WriteUInt32(input, 0, Rfc2217Client.MapNotifyLineStateToWindowsErrors(notification.Payload[0]));
+            WriteUInt32(input, 4, Rfc2217Client.MapNotifyLineStateToWindowsEvents(notification.Payload[0]));
             DeviceIoControlChecked(_commandDriver, IoctlSetLineState, input, null);
         }
     }

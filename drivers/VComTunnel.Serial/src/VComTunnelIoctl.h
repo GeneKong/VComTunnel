@@ -111,6 +111,7 @@ typedef struct _VCT_MODEM_STATE {
 
 typedef struct _VCT_LINE_STATE {
     ULONG Errors;
+    ULONG EventMask;
 } VCT_LINE_STATE, *PVCT_LINE_STATE;
 
 #define VCOMTUNNEL_REMOTE_BAUD_RATE 0x00000001

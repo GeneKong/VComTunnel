@@ -126,8 +126,9 @@ Current implementation note:
   RFC2217 modem/line notifications. RFC2217 modem
   notifications propagate both current-state bits and explicit delta/edge event
   bits. The smoke harness injects fake RFC2217 modem/line notifications after a
-  pending `IOCTL_SERIAL_WAIT_ON_MASK` to verify CTS/DSR/RLSD/RING and BREAK/ERR
-  wakeups through the virtual COM device.
+  pending `IOCTL_SERIAL_WAIT_ON_MASK` to verify CTS/DSR/RLSD/RING, BREAK/ERR,
+  and RFC2217 Data Ready / transmitter-empty wakeups through the virtual COM
+  device.
 - The driver reports `IOCTL_SERIAL_GET_STATS` counters for accepted RX/TX bytes
   and RFC2217 line-state error categories, and supports
   `IOCTL_SERIAL_CLEAR_STATS`.

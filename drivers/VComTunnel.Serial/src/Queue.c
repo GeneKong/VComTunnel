@@ -1528,13 +1528,18 @@ VctEvtIoDeviceControl(
     case IOCTL_VCOMTUNNEL_SET_LINE_STATE:
         {
             VCT_LINE_STATE lineState;
+            PVOID inputBuffer;
+            size_t inputLength = 0;
             ULONG eventMask = 0;
 
-            status = VctCopyInputBuffer(Request, &lineState, sizeof(lineState));
+            RtlZeroMemory(&lineState, sizeof(lineState));
+            status = WdfRequestRetrieveInputBuffer(Request, sizeof(lineState.Errors), &inputBuffer, &inputLength);
             if (NT_SUCCESS(status)) {
+                RtlCopyMemory(&lineState, inputBuffer, inputLength < sizeof(lineState) ? inputLength : sizeof(lineState));
                 WdfSpinLockAcquire(context->Lock);
                 context->LineErrors = lineState.Errors;
                 VctAccumulateLineStatsLocked(context, lineState.Errors);
+                eventMask |= lineState.EventMask;
                 if (lineState.Errors != 0) {
                     eventMask |= SERIAL_EV_ERR;
                 }

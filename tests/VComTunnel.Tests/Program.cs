@@ -536,6 +536,9 @@ static void Rfc2217NotificationMappings()
     AssertEqual("0", Rfc2217Client.MapNotifyModemStateToWindowsEvents(0xB0).ToString());
     AssertEqual("23", Rfc2217Client.MapNotifyLineStateToWindowsErrors(0x1E).ToString());
     AssertEqual("23", Rfc2217Client.MapNotifyLineStateToWindowsErrors(0xFF).ToString());
+    AssertEqual("192", Rfc2217Client.MapNotifyLineStateToWindowsEvents(0x1E).ToString());
+    AssertEqual("5", Rfc2217Client.MapNotifyLineStateToWindowsEvents(0x61).ToString());
+    AssertEqual("133", Rfc2217Client.MapNotifyLineStateToWindowsEvents(0xE1).ToString());
 }
 
 static void Com2TcpCommandUsesBatchWrapper()

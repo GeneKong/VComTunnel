@@ -244,6 +244,7 @@ struct VCT_MODEM_STATE {
 
 struct VCT_LINE_STATE {
     UINT32 Errors;
+    UINT32 EventMask;
 };
 ```
 
@@ -253,7 +254,11 @@ The service maps RFC2217 `NOTIFY-MODEMSTATE` current-state bits to Windows
 `SERIAL_EV_CTS`, `SERIAL_EV_DSR`, `SERIAL_EV_RING`, and `SERIAL_EV_RLSD` in
 `EventMask`; the driver also raises the same event bits when cached current
 state changes. It maps RFC2217 `NOTIFY-LINESTATE` error bits to Windows serial
-error bits surfaced through `IOCTL_SERIAL_GET_COMMSTATUS`.
+error bits surfaced through `IOCTL_SERIAL_GET_COMMSTATUS`, and maps RFC2217
+line-state Data Ready plus transmitter-empty bits to `SERIAL_EV_RXCHAR` and
+`SERIAL_EV_TXEMPTY` wait-mask wakeups. The line-state IOCTL accepts the
+original 4-byte `{Errors}` payload and the extended 8-byte `{Errors, EventMask}`
+payload so older service builds remain compatible with the updated driver.
 
 ## Serial Statistics
 

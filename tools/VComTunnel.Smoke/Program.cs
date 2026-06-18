@@ -879,13 +879,28 @@ static async Task VerifyRemoteWaitMaskAsync(
         throw new InvalidOperationException($"Remote line wait-mask mismatch: 0x{lineEvents:X8}, expected 0x{lineMask:X8}.");
     }
 
+    var lineStatusMask = NativeSerial.EvRxChar | NativeSerial.EvTxEmpty;
+    serial.SetWaitMask(lineStatusMask);
+    if (serial.GetWaitMask() != lineStatusMask)
+    {
+        throw new InvalidOperationException($"Failed to set line status wait mask 0x{lineStatusMask:X8}.");
+    }
+
+    var lineStatusWait = serial.WaitOnMaskAsync(timeout, cancellationToken);
+    probe.QueueRemoteNotification(Rfc2217Client.NotifyLineState, [0x61]);
+    var lineStatusEvents = await lineStatusWait;
+    if ((lineStatusEvents & lineStatusMask) != lineStatusMask)
+    {
+        throw new InvalidOperationException($"Remote line status wait-mask mismatch: 0x{lineStatusEvents:X8}, expected 0x{lineStatusMask:X8}.");
+    }
+
     serial.SetWaitMask(0);
     if (serial.GetWaitMask() != 0)
     {
         throw new InvalidOperationException("Failed to clear wait mask.");
     }
 
-    Console.WriteLine($"remote wait-mask: modem=0x{modemEvents:X8} line=0x{lineEvents:X8}");
+    Console.WriteLine($"remote wait-mask: modem=0x{modemEvents:X8} line=0x{lineEvents:X8} line-status=0x{lineStatusEvents:X8}");
 }
 
 static void DumpLogEntries(IReadOnlyList<LogEntry> entries)
@@ -997,6 +1012,8 @@ internal sealed class NativeSerial : IDisposable
     public const uint SerialCtsHandshake = 0x00000008;
     public const uint SerialDcdHandshake = 0x00000020;
     public const uint SerialRtsHandshake = 0x00000080;
+    public const uint EvRxChar = 0x00000001;
+    public const uint EvTxEmpty = 0x00000004;
     public const uint EvCts = 0x00000008;
     public const uint EvDsr = 0x00000010;
     public const uint EvRlsd = 0x00000020;
@@ -1007,15 +1024,20 @@ internal sealed class NativeSerial : IDisposable
     public const uint ExpectedRemoteLineErrors = 0x00000017;
 
     private readonly SafeFileHandle _handle;
+    private readonly string _portName;
 
-    private NativeSerial(SafeFileHandle handle)
+    private NativeSerial(SafeFileHandle handle, string portName)
     {
         _handle = handle;
+        _portName = portName;
     }
 
     public static NativeSerial Open(string portName)
     {
-        var path = portName.StartsWith(@"\\.\", StringComparison.Ordinal) ? portName : $@"\\.\{portName}";
+        var normalizedPortName = portName.StartsWith(@"\\.\", StringComparison.Ordinal)
+            ? portName[@"\\.\".Length..]
+            : portName;
+        var path = $@"\\.\{normalizedPortName}";
         var handle = CreateFileW(
             path,
             GenericRead | GenericWrite,
@@ -1030,7 +1052,7 @@ internal sealed class NativeSerial : IDisposable
             throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not open {path}.");
         }
 
-        return new NativeSerial(handle);
+        return new NativeSerial(handle, normalizedPortName);
     }
 
     public void Write(byte[] data)
@@ -1203,14 +1225,16 @@ internal sealed class NativeSerial : IDisposable
         {
             try
             {
-                SetWaitMask(0);
+                using var cancelHandle = Open(_portName);
+                cancelHandle.SetWaitMask(0);
                 await waitTask.WaitAsync(TimeSpan.FromSeconds(1), CancellationToken.None);
             }
             catch
             {
             }
 
-            throw;
+            throw new InvalidOperationException(
+                "Timed out waiting for IOCTL_SERIAL_WAIT_ON_MASK. If this happened on the line-status check, reinstall the updated VComTunnel.Serial test driver package so RFC2217 Data Ready / TXEMPTY EventMask wakeups are available.");
         }
     }
 

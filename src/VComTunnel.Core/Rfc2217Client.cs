@@ -73,6 +73,10 @@ public sealed class Rfc2217Client
     private const uint SerialEvDsr = 0x00000010;
     private const uint SerialEvRlsd = 0x00000020;
     private const uint SerialEvRing = 0x00000100;
+    private const uint SerialEvRxChar = 0x00000001;
+    private const uint SerialEvTxEmpty = 0x00000004;
+    private const uint SerialEvBreak = 0x00000040;
+    private const uint SerialEvErr = 0x00000080;
     private const uint SerialErrorBreak = 0x00000001;
     private const uint SerialErrorFraming = 0x00000002;
     private const uint SerialErrorOverrun = 0x00000004;
@@ -516,6 +520,16 @@ public sealed class Rfc2217Client
         if ((value & 0x04) != 0) result |= SerialErrorParity;
         if ((value & 0x08) != 0) result |= SerialErrorFraming;
         if ((value & 0x10) != 0) result |= SerialErrorBreak;
+        return result;
+    }
+
+    public static uint MapNotifyLineStateToWindowsEvents(byte value)
+    {
+        uint result = 0;
+        if ((value & 0x01) != 0) result |= SerialEvRxChar;
+        if ((value & 0x60) != 0) result |= SerialEvTxEmpty;
+        if ((value & 0x9E) != 0) result |= SerialEvErr;
+        if ((value & 0x10) != 0) result |= SerialEvBreak;
         return result;
     }
 
