@@ -41,7 +41,7 @@ public sealed class KmdfTunnelSession : IKmdfTunnelSession
     private const uint RemoteParity = 0x00000004;
     private const uint RemoteStopBits = 0x00000008;
     private const ushort ProtocolMajor = 1;
-    private const ushort ProtocolMinor = 1;
+    private const ushort ProtocolMinor = 2;
     private const int MaxEventBytes = 4096;
     private const int MaxRxBytes = 4096;
     private static readonly TimeSpan CommandAckTimeout = Rfc2217Client.RecommendedCommandAckTimeout;

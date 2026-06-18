@@ -94,8 +94,10 @@ Current implementation note:
 - Raw modem-control IOCTLs support MCR DTR/RTS changes by reusing the normal
   RFC2217 SET-CONTROL DTR/RTS path; OUT1, OUT2, and LOOP are cached locally for
   Windows compatibility and have no RFC2217 equivalent.
-- The service requires driver protocol 1.1 so remote accepted settings can use
-  `IOCTL_VCOMTUNNEL_SET_REMOTE_SETTINGS`.
+- The service requires driver protocol 1.2 so remote accepted settings can use
+  `IOCTL_VCOMTUNNEL_SET_REMOTE_SETTINGS` and RFC2217 line-state notifications
+  can wake Windows wait masks through the extended `VCT_LINE_STATE.EventMask`
+  payload.
 - Startup sends hub4com-style full line-state and modem-state masks and waits
   for their ACKs before the mapping is reported as running. Accepted mask ACKs
   may be subsets of the requested masks, matching hub4com/RFC2217 server

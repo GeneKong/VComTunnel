@@ -16,7 +16,7 @@ Interface GUID: {TBD-VCOMTUNNEL-SERVICE-CHANNEL}
 Client:         VComTunnel.Service
 Transport:      DeviceIoControl with overlapped I/O
 Encoding:       fixed binary headers plus payload
-Version:        uint16 major/minor in every attach; current version 1.1
+Version:        uint16 major/minor in every attach; current version 1.2
 ```
 
 Do not use JSON in the driver channel. Keep the kernel boundary fixed-size,
@@ -258,7 +258,10 @@ error bits surfaced through `IOCTL_SERIAL_GET_COMMSTATUS`, and maps RFC2217
 line-state Data Ready plus transmitter-empty bits to `SERIAL_EV_RXCHAR` and
 `SERIAL_EV_TXEMPTY` wait-mask wakeups. The line-state IOCTL accepts the
 original 4-byte `{Errors}` payload and the extended 8-byte `{Errors, EventMask}`
-payload so older service builds remain compatible with the updated driver.
+payload so older service builds remain compatible with the updated driver. The
+service requires protocol minor version 2 or newer before sending the extended
+line-state payload, so an older installed driver fails attach instead of losing
+wait-mask wakeups later in the session.
 
 ## Serial Statistics
 
