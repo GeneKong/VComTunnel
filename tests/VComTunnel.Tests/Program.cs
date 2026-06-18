@@ -17,6 +17,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("RFC2217 command encoding", () => Task.Run(Rfc2217CommandEncoding)),
     ("hub4com RFC2217 client baseline", () => Task.Run(Hub4comRfc2217ClientBaseline)),
     ("RFC2217 telnet parser", () => Task.Run(Rfc2217TelnetParser)),
+    ("RFC2217 stream fragmentation", () => Task.Run(Rfc2217StreamFragmentation)),
     ("RFC2217 ack semantics", () => Task.Run(Rfc2217AckSemantics)),
     ("RFC2217 notification mappings", () => Task.Run(Rfc2217NotificationMappings)),
     ("com2tcp command uses batch wrapper", () => Task.Run(Com2TcpCommandUsesBatchWrapper)),
@@ -360,6 +361,36 @@ static void Rfc2217TelnetParser()
 
     var malformedBaudAck = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x65, 0x00, 0xFF, 0xF0], 7);
     AssertEqual("0", malformedBaudAck.Notifications.Count.ToString());
+}
+
+static void Rfc2217StreamFragmentation()
+{
+    var optionClient = new Rfc2217Client();
+    var firstOption = optionClient.ProcessNetworkBytes([0xFF, 0xFB], 2);
+    AssertEqual("0", firstOption.Replies.Length.ToString());
+    var secondOption = optionClient.ProcessNetworkBytes([0x2C], 1);
+    AssertBytes([0xFF, 0xFD, 0x2C], secondOption.Replies);
+
+    var serialClient = new Rfc2217Client();
+    var firstSerial = serialClient.ProcessNetworkBytes([0x41, 0xFF], 2);
+    AssertBytes([0x41], firstSerial.SerialData);
+    var secondSerial = serialClient.ProcessNetworkBytes([0xFF, 0x42], 2);
+    AssertBytes([0xFF, 0x42], secondSerial.SerialData);
+
+    var notificationClient = new Rfc2217Client();
+    var firstNotification = notificationClient.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x6B, 0xFF], 5);
+    AssertEqual("0", firstNotification.Notifications.Count.ToString());
+    var secondNotification = notificationClient.ProcessNetworkBytes([0xFF, 0xFF, 0xF0], 3);
+    AssertEqual(Rfc2217Client.NotifyModemState.ToString(), secondNotification.Notifications.Single().Command.ToString());
+    AssertBytes([0xFF], secondNotification.Notifications.Single().Payload);
+
+    var signatureClient = new Rfc2217Client();
+    var firstSignature = signatureClient.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x00, 0xFF], 5);
+    AssertEqual("0", firstSignature.Replies.Length.ToString());
+    var secondSignature = signatureClient.ProcessNetworkBytes([0xF0], 1);
+    AssertBytes(
+        [0xFF, 0xFA, 0x2C, 0x00, 0x56, 0x43, 0x6F, 0x6D, 0x54, 0x75, 0x6E, 0x6E, 0x65, 0x6C, 0xFF, 0xF0],
+        secondSignature.Replies);
 }
 
 static void Rfc2217AckSemantics()
