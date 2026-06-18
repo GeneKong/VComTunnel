@@ -8,9 +8,11 @@ using VComTunnel.Core;
 var options = SmokeOptions.Parse(args);
 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(options.TimeoutSeconds));
 Task? server = null;
+FakeRfc2217Probe? probe = null;
 if (!options.Remote)
 {
-    server = FakeRfc2217EchoServer.RunAsync(options.Port, cts.Token);
+    probe = new FakeRfc2217Probe();
+    server = FakeRfc2217EchoServer.RunAsync(options.Port, probe, cts.Token);
 }
 
 var log = new InMemoryLog();
@@ -38,7 +40,7 @@ using var serial = NativeSerial.Open(options.PortName);
 var controlTxBytes = 0;
 if (options.ControlIoctls)
 {
-    controlTxBytes = await ExerciseControlIoctlsAsync(serial, options.ExpectEcho, TimeSpan.FromSeconds(options.ReadSeconds), cts.Token);
+    controlTxBytes = await ExerciseControlIoctlsAsync(serial, probe, options.ExpectEcho, TimeSpan.FromSeconds(options.ReadSeconds), cts.Token);
 }
 
 try
@@ -121,15 +123,34 @@ static void DumpLogs(InMemoryLog log) => DumpLogEntries(log.Snapshot(20));
 
 static async Task<int> ExerciseControlIoctlsAsync(
     NativeSerial serial,
+    FakeRfc2217Probe? probe,
     bool expectEcho,
     TimeSpan readTimeout,
     CancellationToken cancellationToken)
 {
+    const byte setControl = 5;
+    const byte localFlowControlSuspend = 8;
+    const byte localFlowControlResume = 9;
+
     serial.ClearStats();
     serial.ValidateCommConfig();
     serial.SetQueueSize(4096, 4096);
 
     serial.SetRawModemControl(NativeSerial.McrDtr | NativeSerial.McrRts | NativeSerial.McrLoop);
+    if (probe is not null)
+    {
+        await probe.WaitForAsync(
+            notification => notification.Command == setControl && notification.Payload is [8],
+            "SET-CONTROL DTR on",
+            readTimeout,
+            cancellationToken);
+        await probe.WaitForAsync(
+            notification => notification.Command == setControl && notification.Payload is [11],
+            "SET-CONTROL RTS on",
+            readTimeout,
+            cancellationToken);
+    }
+
     var rawModemControl = serial.GetRawModemControl();
     var expectedModemControl = NativeSerial.McrDtr | NativeSerial.McrRts | NativeSerial.McrLoop;
     if ((rawModemControl & expectedModemControl) != expectedModemControl)
@@ -138,7 +159,24 @@ static async Task<int> ExerciseControlIoctlsAsync(
     }
 
     serial.SetXoff();
+    if (probe is not null)
+    {
+        await probe.WaitForAsync(
+            notification => notification.Command == localFlowControlSuspend && notification.Payload.Length == 0,
+            "FLOWCONTROL-SUSPEND",
+            readTimeout,
+            cancellationToken);
+    }
+
     serial.SetXon();
+    if (probe is not null)
+    {
+        await probe.WaitForAsync(
+            notification => notification.Command == localFlowControlResume && notification.Payload.Length == 0,
+            "FLOWCONTROL-RESUME",
+            readTimeout,
+            cancellationToken);
+    }
 
     if (!expectEcho)
     {
@@ -445,9 +483,60 @@ internal sealed class NativeSerial : IDisposable
         IntPtr overlapped);
 }
 
+internal sealed class FakeRfc2217Probe
+{
+    private readonly object _gate = new();
+    private readonly List<Rfc2217Notification> _notifications = [];
+
+    public void Record(Rfc2217Notification notification)
+    {
+        lock (_gate)
+        {
+            _notifications.Add(new Rfc2217Notification(notification.Command, notification.Payload.ToArray()));
+        }
+    }
+
+    public async Task WaitForAsync(
+        Func<Rfc2217Notification, bool> predicate,
+        string description,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            lock (_gate)
+            {
+                if (_notifications.Any(predicate))
+                {
+                    return;
+                }
+            }
+
+            await Task.Delay(20, cancellationToken);
+        }
+
+        var seen = Snapshot();
+        var details = seen.Length == 0
+            ? "none"
+            : string.Join(", ", seen.Select(Rfc2217ExpectedAck.Describe));
+        throw new InvalidOperationException($"Timed out waiting for RFC2217 {description}. Seen: {details}.");
+    }
+
+    private Rfc2217Notification[] Snapshot()
+    {
+        lock (_gate)
+        {
+            return _notifications
+                .Select(notification => new Rfc2217Notification(notification.Command, notification.Payload.ToArray()))
+                .ToArray();
+        }
+    }
+}
+
 internal static class FakeRfc2217EchoServer
 {
-    public static async Task RunAsync(int port, CancellationToken cancellationToken)
+    public static async Task RunAsync(int port, FakeRfc2217Probe? probe, CancellationToken cancellationToken)
     {
         var listener = new TcpListener(IPAddress.Loopback, port);
         listener.Start();
@@ -477,6 +566,7 @@ internal static class FakeRfc2217EchoServer
 
                 foreach (var notification in frame.Notifications)
                 {
+                    probe?.Record(notification);
                     var ack = BuildServerAck(notification);
                     if (ack.Length > 0)
                     {
