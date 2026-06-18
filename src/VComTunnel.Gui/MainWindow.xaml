@@ -87,9 +87,6 @@
                 <Button x:Name="AddButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"
                         Click="Add_Click"/>
-                <Button x:Name="SaveButton"
-                        Style="{StaticResource ToolBarIconButtonStyle}"
-                        Click="Save_Click"/>
                 <Button x:Name="DeleteMappingButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"
                         Click="DeleteMapping_Click"/>
@@ -100,16 +97,6 @@
                 <Button x:Name="StopButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"
                         Click="StopSelectedMapping_Click"/>
-                <Border Style="{StaticResource ToolBarSeparatorStyle}"/>
-                <Button x:Name="PortsButton"
-                        Style="{StaticResource ToolBarIconButtonStyle}"
-                        Click="Ports_Click"/>
-                <Button x:Name="CreatePairButton"
-                        Style="{StaticResource ToolBarIconButtonStyle}"
-                        Click="CreatePair_Click"/>
-                <Button x:Name="DeletePairButton"
-                        Style="{StaticResource ToolBarIconButtonStyle}"
-                        Click="DeletePair_Click"/>
                 <Border Style="{StaticResource ToolBarSeparatorStyle}"/>
                 <Button x:Name="SetupDepsButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"
@@ -158,6 +145,7 @@
                           VerticalScrollBarVisibility="Auto"
                           ScrollViewer.CanContentScroll="True"
                           EnableColumnVirtualization="True"
+                          CellEditEnding="MappingsGrid_CellEditEnding"
                           SelectionChanged="MappingsGrid_SelectionChanged"
                           PreviewKeyDown="MappingsGrid_PreviewKeyDown"
                           ContextMenuOpening="MappingsGrid_ContextMenuOpening"

@@ -33,6 +33,9 @@ public partial class MainWindow : Window
     private bool _dependencyPollActive;
     private bool _updatingLanguage;
     private bool _updatingSelection;
+    private bool _savingMappings;
+    private bool _suppressAutoSave;
+    private CancellationTokenSource? _autoSaveCts;
     private UiLanguage _language = GuiText.DefaultLanguage;
 
     public MainWindow()
@@ -49,6 +52,8 @@ public partial class MainWindow : Window
     {
         base.OnClosed(e);
         StopOwnedServiceProcess();
+        _autoSaveCts?.Cancel();
+        _autoSaveCts?.Dispose();
         _client.Dispose();
     }
 
@@ -77,13 +82,9 @@ public partial class MainWindow : Window
 
         SetToolbarButton(RefreshButton, PackIconMaterialKind.Refresh, "Action.Refresh");
         SetToolbarButton(AddButton, PackIconMaterialKind.Plus, "Action.Add");
-        SetToolbarButton(SaveButton, PackIconMaterialKind.ContentSave, "Action.Save");
         SetToolbarButton(DeleteMappingButton, PackIconMaterialKind.DeleteOutline, "Action.DeleteMapping");
         SetToolbarButton(StartButton, PackIconMaterialKind.Play, "Action.Start");
         SetToolbarButton(StopButton, PackIconMaterialKind.Stop, "Action.Stop");
-        SetToolbarButton(PortsButton, PackIconMaterialKind.FormatListBulleted, "Action.Ports");
-        SetToolbarButton(CreatePairButton, PackIconMaterialKind.Link, "Action.CreatePair");
-        SetToolbarButton(DeletePairButton, PackIconMaterialKind.DeleteOutline, "Action.DeletePair");
         SetToolbarButton(SetupDepsButton, PackIconMaterialKind.Cog, "Action.SetupDeps");
         SetToolbarButton(ClearLogsButton, PackIconMaterialKind.Broom, "Action.ClearLogs");
 
@@ -264,6 +265,8 @@ public partial class MainWindow : Window
         await DeleteSelectedMappingAsync();
     }
 
+    private void MappingsGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e) => ScheduleAutoSave();
+
     private void MappingsGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is not DataGrid grid || e.OriginalSource is not DependencyObject source)
@@ -306,9 +309,7 @@ public partial class MainWindow : Window
         DeleteMappingButton.IsEnabled = canUseMapping;
         DeleteMappingMenuItem.IsEnabled = canUseMapping;
         DeleteSelectedMappingMenuItem.IsEnabled = canUseMapping;
-        CreatePairButton.IsEnabled = canUseMapping;
         CreatePairMenuItem.IsEnabled = canUseMapping;
-        DeletePairButton.IsEnabled = canUsePort;
         DeletePairMenuItem.IsEnabled = canUsePort;
         StartButton.IsEnabled = canStart;
         StopButton.IsEnabled = canStop;
@@ -355,10 +356,18 @@ public partial class MainWindow : Window
             ServiceStateText.Text = T("Status.ServiceConnecting");
             var dependencyStale = false;
             var mappings = await _client.GetFromJsonAsync<List<TunnelMapping>>("/api/mappings", JsonOptions) ?? [];
-            _mappings.Clear();
-            foreach (var mapping in mappings)
+            _suppressAutoSave = true;
+            try
             {
-                _mappings.Add(MappingRow.From(mapping));
+                _mappings.Clear();
+                foreach (var mapping in mappings)
+                {
+                    _mappings.Add(MappingRow.From(mapping));
+                }
+            }
+            finally
+            {
+                _suppressAutoSave = false;
             }
 
             await RefreshMappingStatesAsync();
@@ -604,18 +613,62 @@ public partial class MainWindow : Window
             return;
         }
 
-        var answer = MessageBox.Show(
-            TF("Prompt.DeleteMapping", row.Name, row.VisiblePort),
-            T("Title.Mapping"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-        if (answer != MessageBoxResult.Yes)
+        CommitGridEdits();
+        var portTarget = await FindPortTargetForMappingAsync(row);
+        var removePort = false;
+        if (portTarget is not null)
+        {
+            var answerWithPort = MessageBox.Show(
+                TF("Prompt.DeleteMappingWithPort", row.Name, row.VisiblePort, portTarget.Description),
+                T("Title.Mapping"),
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+            if (answerWithPort == MessageBoxResult.Cancel)
+            {
+                return;
+            }
+
+            removePort = answerWithPort == MessageBoxResult.Yes;
+        }
+        else
+        {
+            var answer = MessageBox.Show(
+                TF("Prompt.DeleteMapping", row.Name, row.VisiblePort),
+                T("Title.Mapping"),
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+            if (answer != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+
+        if (!await RemoveMappingRowAsync(row))
         {
             return;
         }
 
+        if (!removePort || portTarget is null)
+        {
+            await RefreshAsync();
+            SetStatus(TF("Status.DeletedMapping", row.Name));
+            return;
+        }
+
+        var portRemoved = await DeleteMappingPortTargetAsync(portTarget);
+        await RefreshAsync();
+        SetStatus(
+            portRemoved
+                ? TF("Status.DeletedMappingAndPort", row.Name)
+                : TF("Status.DeletedMappingPortPending", row.Name),
+            portRemoved ? "info" : "warn");
+    }
+
+    private async Task<bool> RemoveMappingRowAsync(MappingRow row)
+    {
         try
         {
+            _autoSaveCts?.Cancel();
             if (row.CanStop)
             {
                 await _client.PostAsync($"/api/mappings/{row.Id}/stop", null);
@@ -623,20 +676,48 @@ public partial class MainWindow : Window
 
             _mappings.Remove(row);
             MappingsGrid.SelectedItem = null;
-            if (!await SaveMappingsAsync())
-            {
-                await RefreshAsync();
-                return;
-            }
-
-            await RefreshAsync();
-            SetStatus(TF("Status.DeletedMapping", row.Name));
+            return await SaveMappingsAsync(logSuccess: false);
         }
         catch (Exception ex)
         {
             SetStatus(TF("Status.DeleteMappingFailed", ex.Message), "error");
             await RefreshAsync();
+            return false;
         }
+    }
+
+    private async Task<MappingPortTarget?> FindPortTargetForMappingAsync(MappingRow row)
+    {
+        try
+        {
+            if (row.IsKmdf)
+            {
+                var devices = await GetKmdfDevicesAsync();
+                var device = devices.FirstOrDefault(candidate => PortEquals(candidate.PortName, row.VisiblePort));
+                SetComPorts(await RefreshComPairsListAsync(updateDetails: false), devices);
+                return device is null
+                    ? null
+                    : MappingPortTarget.ForKmdf(device);
+            }
+
+            var pairs = await _client.GetFromJsonAsync<List<Com0comPairInfo>>("/api/com0com/pairs", JsonOptions) ?? [];
+            SetComPorts(pairs, await GetKmdfDevicesAsync());
+            var pair = pairs.FirstOrDefault(candidate => PairMatchesMapping(candidate, row));
+            return pair is null
+                ? null
+                : MappingPortTarget.ForCom0com(pair, PairPortText(pair.PortA, "Diag.MissingA"), PairPortText(pair.PortB, "Diag.MissingB"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> DeleteMappingPortTargetAsync(MappingPortTarget target)
+    {
+        return target.KmdfDevice is not null
+            ? await DeleteKmdfPortAsync(target.KmdfDevice, confirm: false)
+            : await DeleteCom0comPairAsync(target.Com0comPair!, confirm: false);
     }
 
     private async Task PostSelectedAsync(string action)
@@ -695,19 +776,73 @@ public partial class MainWindow : Window
 
     private async Task<bool> SaveMappingsAsync()
     {
-        CommitGridEdits();
-        NormalizeRowsBeforeSave();
-        var mappings = _mappings.Select(r => r.ToMapping()).ToList();
-        var response = await _client.PutAsJsonAsync("/api/mappings", mappings, JsonOptions);
-        var body = await response.Content.ReadAsStringAsync();
-        if (response.IsSuccessStatusCode)
+        return await SaveMappingsAsync(logSuccess: true);
+    }
+
+    private async Task<bool> SaveMappingsAsync(bool logSuccess)
+    {
+        _savingMappings = true;
+        try
         {
-            AppendGuiLog("info", T("Log.Gui"), TF("Status.SavedMappings", _mappings.Count));
-            return true;
+            CommitGridEdits();
+            NormalizeRowsBeforeSave();
+            var mappings = _mappings.Select(r => r.ToMapping()).ToList();
+            var response = await _client.PutAsJsonAsync("/api/mappings", mappings, JsonOptions);
+            var body = await response.Content.ReadAsStringAsync();
+            if (response.IsSuccessStatusCode)
+            {
+                if (logSuccess)
+                {
+                    AppendGuiLog("info", T("Log.Gui"), TF("Status.SavedMappings", _mappings.Count));
+                }
+                return true;
+            }
+
+            SetStatus(TF("Status.SaveFailed", body));
+            return false;
+        }
+        finally
+        {
+            _savingMappings = false;
+        }
+    }
+
+    private void ScheduleAutoSave()
+    {
+        if (_suppressAutoSave || _savingMappings || _mappings.Count == 0)
+        {
+            return;
         }
 
-        SetStatus(TF("Status.SaveFailed", body));
-        return false;
+        _autoSaveCts?.Cancel();
+        _autoSaveCts?.Dispose();
+        _autoSaveCts = new CancellationTokenSource();
+        var token = _autoSaveCts.Token;
+        _ = AutoSaveAfterDelayAsync(token);
+    }
+
+    private async Task AutoSaveAfterDelayAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(800), cancellationToken);
+            if (cancellationToken.IsCancellationRequested || !await IsServiceReadyAsync())
+            {
+                return;
+            }
+
+            if (await SaveMappingsAsync(logSuccess: false))
+            {
+                ServiceStateText.Text = T("Status.AutoSaved");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.SaveFailed", ex.Message), "warn");
+        }
     }
 
     private string ActionLabel(string action)
@@ -836,29 +971,31 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task DeleteComPortRowAsync(ComPairRow row)
+    private async Task<bool> DeleteComPortRowAsync(ComPairRow row)
     {
         if (row.IsKmdf)
         {
-            await DeleteKmdfPortAsync(row.ToKmdfDeviceInfo());
-            return;
+            return await DeleteKmdfPortAsync(row.ToKmdfDeviceInfo());
         }
 
-        await DeleteCom0comPairAsync(row.ToInfo());
+        return await DeleteCom0comPairAsync(row.ToInfo());
     }
 
-    private async Task DeleteCom0comPairAsync(Com0comPairInfo pair)
+    private async Task<bool> DeleteCom0comPairAsync(Com0comPairInfo pair, bool confirm = true)
     {
         try
         {
-            var answer = MessageBox.Show(
-                TF("Prompt.DeletePair", pair.PairNumber, PairPortText(pair.PortA, "Diag.MissingA"), PairPortText(pair.PortB, "Diag.MissingB")),
-                T("Title.ComPair"),
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (answer != MessageBoxResult.Yes)
+            if (confirm)
             {
-                return;
+                var answer = MessageBox.Show(
+                    TF("Prompt.DeletePair", pair.PairNumber, PairPortText(pair.PortA, "Diag.MissingA"), PairPortText(pair.PortB, "Diag.MissingB")),
+                    T("Title.ComPair"),
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+                if (answer != MessageBoxResult.Yes)
+                {
+                    return false;
+                }
             }
 
             var response = await _client.PostAsync($"/api/com0com/pairs/{pair.PairNumber}/remove-plan", null);
@@ -866,24 +1003,26 @@ public partial class MainWindow : Window
             if (!response.IsSuccessStatusCode)
             {
                 SetStatus(TF("Status.DeletePairFailed", ExtractError(body)), "error");
-                return;
+                return false;
             }
 
             var plan = JsonSerializer.Deserialize<SetupcCommandPlan>(body, JsonOptions);
             if (plan is null)
             {
                 SetStatus(T("Status.DeletePairEmptyPlan"), "error");
-                return;
+                return false;
             }
 
             LaunchSetupcPlan(plan);
             await RefreshComPairsListAsync(updateDetails: true);
             SetStatus(TF("Status.WaitingPairRemoved", pair.PairNumber));
             _ = PollCom0comPairsAfterSetupcAsync(removedPairNumber: pair.PairNumber);
+            return true;
         }
         catch (Exception ex)
         {
             SetStatus(TF("Status.DeletePairFailed", ex.Message), "error");
+            return false;
         }
     }
 
@@ -1011,22 +1150,25 @@ public partial class MainWindow : Window
         await DeleteKmdfPortAsync(device);
     }
 
-    private async Task DeleteKmdfPortAsync(KmdfDeviceInfo device)
+    private async Task<bool> DeleteKmdfPortAsync(KmdfDeviceInfo device, bool confirm = true)
     {
-        var answer = MessageBox.Show(
-            TF("Prompt.DeleteKmdfPort", device.PortName, device.InstanceId),
-            T("Title.KmdfPort"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-        if (answer != MessageBoxResult.Yes)
+        if (confirm)
         {
-            return;
+            var answer = MessageBox.Show(
+                TF("Prompt.DeleteKmdfPort", device.PortName, device.InstanceId),
+                T("Title.KmdfPort"),
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+            if (answer != MessageBoxResult.Yes)
+            {
+                return false;
+            }
         }
 
         var operation = LaunchKmdfCtl("remove", device.PortName);
         if (operation is null)
         {
-            return;
+            return false;
         }
 
         SetStatus(TF("Status.WaitingKmdfPortRemoved", device.PortName));
@@ -1034,10 +1176,11 @@ public partial class MainWindow : Window
         if (wait.Success)
         {
             SetStatus(TF("Status.DeletedKmdfPort", device.PortName));
-            return;
+            return true;
         }
 
         SetStatus(wait.FailureMessage ?? TF("Status.DeleteKmdfPortStillListed", device.PortName), "warn");
+        return false;
     }
 
     private async Task<bool> EnsureKmdfPortExistsBeforeStartAsync(MappingRow row)
@@ -1877,6 +2020,15 @@ internal sealed record KmdfCtlLaunch(string ResultFile);
 internal sealed record KmdfCtlResult(bool Success, string Message);
 
 internal sealed record KmdfWaitResult(bool Success, string? FailureMessage);
+
+internal sealed record MappingPortTarget(Com0comPairInfo? Com0comPair, KmdfDeviceInfo? KmdfDevice, string Description)
+{
+    public static MappingPortTarget ForCom0com(Com0comPairInfo pair, string portA, string portB) =>
+        new(pair, null, $"{portA} <-> {portB}");
+
+    public static MappingPortTarget ForKmdf(KmdfDeviceInfo device) =>
+        new(null, device, $"{device.PortName} ({device.InstanceId})");
+}
 
 public sealed class ComPairRow
 {
