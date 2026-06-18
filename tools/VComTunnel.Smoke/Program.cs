@@ -140,6 +140,7 @@ static async Task<int> ExerciseControlIoctlsAsync(
     serial.ClearStats();
     serial.ValidateCommConfig();
     serial.SetQueueSize(4096, 4096);
+    await WaitForRemoteNotificationsAsync(serial, probe, readTimeout, cancellationToken);
 
     serial.SetBaudRate(115200);
     await WaitForRfc2217Async(
@@ -273,6 +274,22 @@ static Task WaitForRfc2217Async(
         : probe.WaitForAsync(predicate, description, timeout, cancellationToken);
 }
 
+static async Task WaitForRemoteNotificationsAsync(
+    NativeSerial serial,
+    FakeRfc2217Probe? probe,
+    TimeSpan timeout,
+    CancellationToken cancellationToken)
+{
+    if (probe is null)
+    {
+        return;
+    }
+
+    var modemStatus = await serial.WaitForModemStatusAsync(NativeSerial.ExpectedRemoteModemStatus, timeout, cancellationToken);
+    var lineErrors = await serial.WaitForCommErrorsAsync(NativeSerial.ExpectedRemoteLineErrors, timeout, cancellationToken);
+    Console.WriteLine($"remote notifications: modem=0x{modemStatus:X8} errors=0x{lineErrors:X8}");
+}
+
 static void DumpLogEntries(IReadOnlyList<LogEntry> entries)
 {
     foreach (var entry in entries)
@@ -343,6 +360,8 @@ internal sealed class NativeSerial : IDisposable
     public const uint McrLoop = 0x00000010;
     public const uint PurgeTxClear = 0x00000004;
     public const uint PurgeRxClear = 0x00000008;
+    public const uint ExpectedRemoteModemStatus = 0x000000F0;
+    public const uint ExpectedRemoteLineErrors = 0x00000017;
 
     private readonly SafeFileHandle _handle;
 
@@ -409,10 +428,53 @@ internal sealed class NativeSerial : IDisposable
 
     public uint GetInQueue()
     {
-        var output = new byte[24];
-        DeviceIoControlChecked(IoctlSerialGetCommStatus, null, output, "IOCTL_SERIAL_GET_COMMSTATUS");
+        return BitConverter.ToUInt32(GetCommStatus(), 8);
+    }
 
-        return BitConverter.ToUInt32(output, 8);
+    public uint GetCommErrors()
+    {
+        return BitConverter.ToUInt32(GetCommStatus(), 0);
+    }
+
+    public uint GetModemStatus()
+    {
+        var output = new byte[4];
+        DeviceIoControlChecked(IoctlSerialGetModemStatus, null, output, "IOCTL_SERIAL_GET_MODEMSTATUS");
+        return BitConverter.ToUInt32(output);
+    }
+
+    public async Task<uint> WaitForModemStatusAsync(uint expectedMask, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var status = GetModemStatus();
+            if ((status & expectedMask) == expectedMask)
+            {
+                return status;
+            }
+
+            await Task.Delay(20, cancellationToken);
+        }
+
+        throw new InvalidOperationException($"Timed out waiting for modem status 0x{expectedMask:X8}; last value was 0x{GetModemStatus():X8}.");
+    }
+
+    public async Task<uint> WaitForCommErrorsAsync(uint expectedMask, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var errors = GetCommErrors();
+            if ((errors & expectedMask) == expectedMask)
+            {
+                return errors;
+            }
+
+            await Task.Delay(20, cancellationToken);
+        }
+
+        throw new InvalidOperationException($"Timed out waiting for comm errors 0x{expectedMask:X8}; last value was 0x{GetCommErrors():X8}.");
     }
 
     public void ValidateCommConfig()
@@ -557,6 +619,7 @@ internal sealed class NativeSerial : IDisposable
     private const uint IoctlSerialSetXon = (0x1Bu << 16) | (15u << 2);
     private const uint IoctlSerialPurge = (0x1Bu << 16) | (19u << 2);
     private const uint IoctlSerialSetHandflow = (0x1Bu << 16) | (25u << 2);
+    private const uint IoctlSerialGetModemStatus = (0x1Bu << 16) | (26u << 2);
     private const uint IoctlSerialGetCommStatus = (0x1Bu << 16) | (27u << 2);
     private const uint IoctlSerialConfigSize = (0x1Bu << 16) | (32u << 2);
     private const uint IoctlSerialGetCommConfig = (0x1Bu << 16) | (33u << 2);
@@ -582,6 +645,13 @@ internal sealed class NativeSerial : IDisposable
         }
 
         return bytesReturned;
+    }
+
+    private byte[] GetCommStatus()
+    {
+        var output = new byte[24];
+        DeviceIoControlChecked(IoctlSerialGetCommStatus, null, output, "IOCTL_SERIAL_GET_COMMSTATUS");
+        return output;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -663,6 +733,7 @@ internal static class FakeRfc2217EchoServer
 
             var parser = new Rfc2217Client();
             var buffer = new byte[4096];
+            var sentStatusNotifications = false;
             while (!cancellationToken.IsCancellationRequested)
             {
                 var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
@@ -685,6 +756,13 @@ internal static class FakeRfc2217EchoServer
                     {
                         await stream.WriteAsync(ack, cancellationToken);
                     }
+                }
+
+                if (!sentStatusNotifications)
+                {
+                    sentStatusNotifications = true;
+                    await stream.WriteAsync(BuildServerFrame(Rfc2217Client.NotifyModemState, [0xF0]), cancellationToken);
+                    await stream.WriteAsync(BuildServerFrame(Rfc2217Client.NotifyLineState, [0x1E]), cancellationToken);
                 }
 
                 if (frame.SerialData.Length > 0)
@@ -722,14 +800,19 @@ internal static class FakeRfc2217EchoServer
             return [];
         }
 
-        var frame = new List<byte>(notification.Payload.Length + 5)
+        return BuildServerFrame(command, notification.Payload);
+    }
+
+    private static byte[] BuildServerFrame(byte command, params byte[] payload)
+    {
+        var frame = new List<byte>(payload.Length + 5)
         {
             255,
             250,
             44,
             command
         };
-        foreach (var value in notification.Payload)
+        foreach (var value in payload)
         {
             frame.Add(value);
             if (value == 255)

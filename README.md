@@ -32,6 +32,8 @@ dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -
 Local smoke runs include control IOCTL probes for comm config, queue size,
 stats, baud-rate, line-control, raw modem control, handflow, BREAK, purge,
 XOFF/XON, immediate-char echo, and the RFC2217 frames emitted by those controls.
+The local fake server also injects RFC2217 modem/line-state notifications and
+checks that they appear through local serial status IOCTLs.
 Remote smoke skips those extra probes unless `--control-ioctls` is passed.
 
 ## Run
