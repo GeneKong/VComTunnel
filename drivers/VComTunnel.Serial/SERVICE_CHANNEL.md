@@ -177,6 +177,8 @@ Driver behavior:
 - Signal `SERIAL_EV_RXCHAR` for pushed RX bytes, and also signal
   `SERIAL_EV_RXFLAG` when the frame contains the current
   `SERIAL_CHARS.EventChar`.
+- Signal `SERIAL_EV_RX80FULL` when the accepted frame leaves the RX ring buffer
+  at or above 80% occupancy.
 - Serial reads with an empty RX queue are held as one cancelable pending read
   while the service is connecting/online, and completed when the next `PUSH_RX`
   frame arrives.

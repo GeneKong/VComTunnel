@@ -119,9 +119,10 @@ Current implementation note:
 - Startup connection failures and runtime network drops feed the same
   `RestartOnFailure` policy. Manual Stop invalidates delayed restarts so a
   stopped mapping stays stopped.
-- Wait-mask notifications currently cover RXCHAR, RXFLAG, TXEMPTY, CTS, DSR,
-  RLSD, RING, BREAK, and ERR events raised by service TX consumption, received
-  bytes, EventChar matches, or RFC2217 modem/line notifications. RFC2217 modem
+- Wait-mask notifications currently cover RXCHAR, RXFLAG, RX80FULL, TXEMPTY,
+  CTS, DSR, RLSD, RING, BREAK, and ERR events raised by service TX
+  consumption, received bytes, RX queue occupancy, EventChar matches, or
+  RFC2217 modem/line notifications. RFC2217 modem
   notifications propagate both current-state bits and explicit delta/edge event
   bits.
 - The driver reports `IOCTL_SERIAL_GET_STATS` counters for accepted RX/TX bytes

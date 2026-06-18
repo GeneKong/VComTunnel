@@ -944,6 +944,9 @@ VctPushRx(
             if (VctBufferContainsByte(push->Bytes, pushed, Context->Chars.EventChar)) {
                 eventMask |= SERIAL_EV_RXFLAG;
             }
+            if (Context->RxCount >= VCOMTUNNEL_RX_QUEUE_80_FULL) {
+                eventMask |= SERIAL_EV_RX80FULL;
+            }
         }
         if (pushed == push->ByteCount && Context->PendingRead != NULL) {
             readRequest = Context->PendingRead;

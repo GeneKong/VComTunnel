@@ -201,7 +201,8 @@ FLOWCONTROL-SUSPEND/RESUME,
 SIGNATURE request response, serialized Telnet/RFC2217 writes with idle NOP
 keep-alive that continues during serial flow-control suspension,
 modem/line notification handling, and basic wait-mask notifications
-for RX, RXFLAG/EventChar, TXEMPTY, CTS, DSR, RLSD, RING, BREAK, and ERR events,
+for RX, RXFLAG/EventChar, RX80FULL, TXEMPTY, CTS, DSR, RLSD, RING, BREAK, and
+ERR events,
 plus serial RX/TX/error statistics through `IOCTL_SERIAL_GET_STATS` and
 `IOCTL_SERIAL_CLEAR_STATS`, and immediate-character transmit through
 `IOCTL_SERIAL_IMMEDIATE_CHAR`. Windows serial configuration probes
