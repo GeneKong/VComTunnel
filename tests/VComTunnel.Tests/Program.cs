@@ -16,7 +16,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("missing dependencies fault mapping", MissingDependenciesFaultMappingAsync),
     ("missing backing port faults before hub4com", MissingBackingPortFaultsBeforeHub4comAsync),
     ("com0com create and remove plans", Com0comCreateAndRemovePlansAsync),
-    ("KMDF mapping reports unsupported", KmdfMappingReportsUnsupportedAsync),
+    ("KMDF mapping faults when driver is missing", KmdfMappingFaultsWhenDriverIsMissingAsync),
     ("fake com2tcp process starts and stops", FakeCom2TcpProcessStartsAndStopsAsync),
     ("dependency installer extracts tool zips", DependencyInstallerExtractsToolZipsAsync),
     ("dependency installer uses bundled release archives", DependencyInstallerUsesBundledReleaseArchivesAsync)
@@ -201,7 +201,7 @@ static async Task MissingBackingPortFaultsBeforeHub4comAsync()
     AssertStringContains(status.LastError ?? "", "Existing ports: COM27, COM28");
 }
 
-static async Task KmdfMappingReportsUnsupportedAsync()
+static async Task KmdfMappingFaultsWhenDriverIsMissingAsync()
 {
     using var temp = new TempDir();
     var mapping = new TunnelMapping
@@ -215,8 +215,8 @@ static async Task KmdfMappingReportsUnsupportedAsync()
     var orchestrator = CreateOrchestrator(store, new DependencyDetector([temp.Path], pathOverride: ""), new InMemoryLog());
 
     var status = await orchestrator.StartAsync((await store.LoadAsync()).Mappings.Single().Id);
-    AssertEqual(TunnelRunState.Unsupported.ToString(), status.State.ToString());
-    AssertStringContains(status.LastError ?? "", "KMDF backend scaffold");
+    AssertEqual(TunnelRunState.Faulted.ToString(), status.State.ToString());
+    AssertStringContains(status.LastError ?? "", "Could not open KMDF virtual serial port");
 }
 
 static async Task Com0comCreateAndRemovePlansAsync()

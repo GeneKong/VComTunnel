@@ -70,6 +70,14 @@ Rfc2217Client
 The first implementation should keep `KmdfDriverClient` isolated from the rest
 of the app so driver protocol churn does not leak into GUI/API models.
 
+Current implementation note:
+
+- `KmdfTunnelSession` is the first service-side implementation.
+- It opens `\\.\COMx`, sends `ATTACH`, waits for driver `TxData` events, writes
+  them to a TCP stream, reads TCP bytes, and sends `PUSH_RX` back to the driver.
+- RFC2217 negotiation is not implemented in this class yet; it is a raw TCP
+  data path for validating the KMDF driver channel.
+
 ## Start Flow
 
 ```text
@@ -198,8 +206,10 @@ Only after fake loopback is stable should RFC2217 be connected.
 
 ## GUI Changes
 
-Until the KMDF backend is implemented, the GUI should keep blocking `kmdf`
-start. When M3 fake loopback works, enable:
+The GUI no longer blocks `kmdf` start. If the test driver is not installed, the
+service returns `Faulted` with the driver open error.
+
+Remaining GUI work:
 
 - `backend = kmdf`
 - no `backingPort` editing
@@ -249,4 +259,3 @@ Phase 2 prototype is not complete until all are true:
 - Stopping `VComTunnel.Service` causes controlled serial I/O failure, not a
   hang or bugcheck.
 - Uninstalling the test driver removes the COM device cleanly.
-

@@ -63,10 +63,7 @@ public sealed class TunnelOrchestrator
 
         if (mapping.Backend == TunnelBackend.Kmdf)
         {
-            var unsupported = new ManagedTunnel(mapping, TunnelRunState.Unsupported, null, null, "KMDF backend scaffold is present but driver/service channel is not implemented yet.");
-            _tunnels[id] = unsupported;
-            _log.Warn(mapping.Name, unsupported.LastError!);
-            return unsupported.ToStatus();
+            return await StartKmdfAsync(mapping, cancellationToken);
         }
 
         var dependencies = _dependencyDetector.Detect();
@@ -77,7 +74,7 @@ public sealed class TunnelOrchestrator
 
         if (!dependencies.IsReadyForCom0comHub4com)
         {
-            var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, "com0com/hub4com dependencies are missing.");
+            var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, "com0com/hub4com dependencies are missing.");
             _tunnels[id] = faulted;
             _log.Error(mapping.Name, faulted.LastError!);
             return faulted.ToStatus();
@@ -85,13 +82,13 @@ public sealed class TunnelOrchestrator
 
         if (!IsBackingPortRegistered(mapping, out var portError))
         {
-            var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, portError);
+            var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, portError);
             _tunnels[id] = faulted;
             _log.Error(mapping.Name, faulted.LastError!);
             return faulted.ToStatus();
         }
 
-        StopProcess(id);
+        StopExisting(id);
         _lastProcessErrors.TryRemove(id, out _);
         var command = _hub4comCommandBuilder.Build(mapping);
         var process = new Process
@@ -131,7 +128,7 @@ public sealed class TunnelOrchestrator
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        var tunnel = new ManagedTunnel(mapping, TunnelRunState.Running, process, DateTimeOffset.UtcNow, null);
+        var tunnel = new ManagedTunnel(mapping, TunnelRunState.Running, process, null, DateTimeOffset.UtcNow, null);
         _tunnels[id] = tunnel;
         _log.Info(mapping.Name, $"Started hub4com process {process.Id}.");
 
@@ -146,9 +143,9 @@ public sealed class TunnelOrchestrator
 
     public TunnelStatus Stop(string id)
     {
-        StopProcess(id);
+        StopExisting(id);
         _lastProcessErrors.TryRemove(id, out _);
-        var stopped = new ManagedTunnel(new TunnelMapping { Id = id }, TunnelRunState.Stopped, null, null, null);
+        var stopped = new ManagedTunnel(new TunnelMapping { Id = id }, TunnelRunState.Stopped, null, null, null, null);
         _tunnels[id] = stopped;
         _log.Info(id, "Stopped.");
         return stopped.ToStatus();
@@ -160,6 +157,59 @@ public sealed class TunnelOrchestrator
             _startedAt,
             _configStore.Path,
             _tunnels.Values.Select(t => t.ToStatus()).OrderBy(t => t.Id).ToArray());
+    }
+
+    private async Task<TunnelStatus> StartKmdfAsync(TunnelMapping mapping, CancellationToken cancellationToken)
+    {
+        StopExisting(mapping.Id);
+
+        var session = new KmdfTunnelSession(mapping, _log, (faultedSession, error) => OnKmdfFaulted(mapping, faultedSession, error));
+        _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Starting, null, session, DateTimeOffset.UtcNow, null);
+
+        try
+        {
+            await session.StartAsync(cancellationToken);
+            var running = new ManagedTunnel(mapping, TunnelRunState.Running, null, session, DateTimeOffset.UtcNow, null);
+            _tunnels[mapping.Id] = running;
+            return running.ToStatus();
+        }
+        catch (Exception ex)
+        {
+            session.Dispose();
+            var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, ex.Message);
+            _tunnels[mapping.Id] = faulted;
+            _log.Error(mapping.Name, ex.Message);
+            return faulted.ToStatus();
+        }
+    }
+
+    private void OnKmdfFaulted(TunnelMapping mapping, KmdfTunnelSession session, string error)
+    {
+        _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, error);
+
+        if (!mapping.RestartOnFailure)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            try
+            {
+                await StartAsync(mapping.Id);
+            }
+            catch (Exception ex)
+            {
+                _log.Error(mapping.Name, $"KMDF restart failed: {ex.Message}");
+            }
+        });
+    }
+
+    private void StopExisting(string id)
+    {
+        StopProcess(id);
+        StopKmdf(id);
     }
 
     private void StopProcess(string id)
@@ -187,11 +237,21 @@ public sealed class TunnelOrchestrator
         }
     }
 
+    private void StopKmdf(string id)
+    {
+        if (!_tunnels.TryGetValue(id, out var existing) || existing.KmdfSession is null)
+        {
+            return;
+        }
+
+        existing.KmdfSession.Dispose();
+    }
+
     private void OnProcessExited(TunnelMapping mapping, Process process)
     {
         var message = BuildExitMessage(mapping, process);
         _log.Warn(mapping.Name, message);
-        _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, message);
+        _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, message);
 
         if (!mapping.RestartOnFailure || IsPermanentProcessError(message))
         {
@@ -215,7 +275,7 @@ public sealed class TunnelOrchestrator
     private TunnelStatus BuildExitedStatus(TunnelMapping mapping, Process process)
     {
         var message = BuildExitMessage(mapping, process);
-        var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, message);
+        var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, message);
         _tunnels[mapping.Id] = faulted;
         return faulted.ToStatus();
     }
@@ -274,18 +334,21 @@ public sealed class TunnelOrchestrator
         TunnelMapping Mapping,
         TunnelRunState State,
         Process? Process,
+        KmdfTunnelSession? KmdfSession,
         DateTimeOffset? StartedAt,
         string? LastError)
     {
         public TunnelStatus ToStatus()
         {
+            var state = KmdfSession?.State ?? State;
+            var lastError = KmdfSession?.LastError ?? LastError;
             return new TunnelStatus(
                 Mapping.Id,
-                State,
+                state,
                 Mapping.Backend.ToString(),
                 Process?.HasExited == false ? Process.Id : null,
                 StartedAt,
-                LastError);
+                lastError);
         }
     }
 }

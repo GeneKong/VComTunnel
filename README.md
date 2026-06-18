@@ -10,7 +10,7 @@ The current implementation delivers the phase 1 baseline:
 - CLI helper `vcomtunnelctl`
 - External dependency detection for `com0com`, `hub4com.exe`, and `com2tcp-rfc2217.bat`
 - Release-package bundled setup for com0com and hub4com, with download fallback for development builds
-- KMDF backend scaffold with explicit "not ready" diagnostics
+- Experimental KMDF backend with a buildable driver skeleton and raw TCP service path
 
 Flutter was checked first, but `flutter --version` timed out repeatedly in this environment. The GUI therefore uses the planned `.NET WPF` fallback.
 
@@ -154,12 +154,12 @@ After installing external dependencies and creating the com0com pair:
 
 Current stopping point without external integration: this repo can build, validate configs, run the service API, manage mappings, diagnose missing dependencies, and start/stop a fake `com2tcp-rfc2217` process. A real end-to-end serial session requires externally installed com0com/hub4com plus an RFC2217 endpoint.
 
-## Phase 2 KMDF scaffold
+## Phase 2 KMDF backend
 
 `drivers/VComTunnel.Serial` contains the driver-side design notes, private
-service-channel protocol, INF skeleton, and guarded manual install script. The
-service returns an explicit unsupported status for `kmdf` mappings until the
-driver and user-mode channel are implemented.
+service-channel protocol, INF, WDK project, and guarded manual install script.
+The service can now start a `kmdf` mapping by opening the visible COM device,
+attaching to the driver IOCTL channel, and forwarding bytes to a TCP endpoint.
 
 The intended KMDF backend removes the phase 1 dependency on com0com and hub4com:
 
@@ -167,4 +167,6 @@ The intended KMDF backend removes the phase 1 dependency on com0com and hub4com:
 serial tool -> COMx -> VComTunnel.Serial.sys -> VComTunnel.Service -> RFC2217
 ```
 
-Current status remains design/scaffold only; no `.sys` or signed package exists.
+Current status is still experimental: the WDK project produces a test-signed
+`.sys` and `.cat`, but the user-mode path is raw TCP and RFC2217 negotiation is
+not implemented yet.

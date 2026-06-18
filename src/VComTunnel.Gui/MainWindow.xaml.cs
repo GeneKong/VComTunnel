@@ -610,12 +610,6 @@ public partial class MainWindow : Window
         var actionLabel = ActionLabel(action);
         try
         {
-            if (row.IsKmdf)
-            {
-                SetStatus(T("Status.KmdfUnsupported"));
-                return;
-            }
-
             if (await IsServiceDependencyStateStaleAsync())
             {
                 SetStatus(T("Status.DependencyStateStale"), "warn");
@@ -839,6 +833,11 @@ public partial class MainWindow : Window
 
     private async Task<bool> EnsurePairExistsBeforeStartAsync(MappingRow row)
     {
+        if (row.IsKmdf)
+        {
+            return true;
+        }
+
         var pairs = await RefreshComPairsListAsync(updateDetails: false);
         if (pairs.Any(pair => PairMatchesMapping(pair, row)))
         {
@@ -1354,7 +1353,7 @@ public sealed class MappingRow
     public TunnelRunState RunState { get; set; } = TunnelRunState.Stopped;
     public string StateLabel { get; set; } = "";
     public bool IsKmdf => string.Equals(Backend, "kmdf", StringComparison.OrdinalIgnoreCase);
-    public bool CanStart => !IsKmdf && RunState is not TunnelRunState.Running and not TunnelRunState.Starting and not TunnelRunState.Unsupported;
+    public bool CanStart => RunState is not TunnelRunState.Running and not TunnelRunState.Starting and not TunnelRunState.Unsupported;
     public bool CanStop => RunState is TunnelRunState.Running or TunnelRunState.Starting;
 
     public static MappingRow From(TunnelMapping mapping)
