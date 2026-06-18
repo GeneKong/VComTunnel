@@ -221,6 +221,8 @@ correlation with accepted-value validation and timeout retry,
 startup line/modem mask ACK validation, remote flow-control suspend/resume
 handling, local XOFF/XON and RX backpressure through RFC2217
 FLOWCONTROL-SUSPEND/RESUME,
+hub4com client-mode purge semantics where local RX clear stays inside the
+virtual COM driver and only TX clear is sent as RFC2217 PURGE-DATA,
 SIGNATURE request response, serialized Telnet/RFC2217 writes with idle NOP
 keep-alive that continues during serial flow-control suspension,
 modem/line notification handling, and basic wait-mask notifications

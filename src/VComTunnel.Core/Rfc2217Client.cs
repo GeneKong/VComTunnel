@@ -484,13 +484,7 @@ public sealed class Rfc2217Client
 
     public static byte MapPurge(uint purgeMask)
     {
-        return (purgeMask & (SerialPurgeRxClear | SerialPurgeTxClear)) switch
-        {
-            SerialPurgeRxClear => (byte)1,
-            SerialPurgeTxClear => (byte)2,
-            SerialPurgeRxClear | SerialPurgeTxClear => (byte)3,
-            _ => (byte)0
-        };
+        return (purgeMask & SerialPurgeTxClear) != 0 ? (byte)2 : (byte)0;
     }
 
     public static uint MapNotifyModemStateToWindowsStatus(byte value)
