@@ -89,6 +89,8 @@ Current implementation note:
   hub4com's COM-PORT-OPTION client behavior.
 - SET-CONTROL flow-control ACKs may complete with the peer's accepted FCO/FCI
   value, such as no-flow-control; DTR, RTS, BREAK, and purge ACKs remain strict.
+- Windows handflow maps outbound CTS/DSR/DCD/XON-XOFF and inbound DTR/RTS/XON-XOFF
+  into the corresponding RFC2217 SET-CONTROL FCO/FCI values.
 - The service requires driver protocol 1.1 so remote accepted settings can use
   `IOCTL_VCOMTUNNEL_SET_REMOTE_SETTINGS`.
 - Startup sends the initial line-state and modem-state masks and waits for

@@ -332,6 +332,8 @@ static void Rfc2217AckSemantics()
         "Outbound flow-control ACK must not match an inbound accepted value.");
     AssertEqual("17", Rfc2217Client.MapOutboundFlowControl(0x20, 0).ToString());
     AssertEqual("18", Rfc2217Client.MapInboundFlowControl(0x02, 0).ToString());
+    AssertEqual("16", Rfc2217Client.MapInboundFlowControl(0, 0x80).ToString());
+    AssertEqual("16", Rfc2217Client.MapInboundFlowControl(0, 0x82).ToString());
     AssertEqual("3", Rfc2217Client.MapPurge(0x0C).ToString());
     AssertEqual("2", Rfc2217Client.MapRfc2217ParityToWindows(3).ToString());
     AssertEqual("1", Rfc2217Client.MapRfc2217StopBitsToWindows(3).ToString());

@@ -50,6 +50,7 @@ public sealed class Rfc2217Client
     private const uint SerialDcdHandshake = 0x20;
     private const uint SerialAutoTransmit = 0x01;
     private const uint SerialAutoReceive = 0x02;
+    private const uint SerialRtsHandshake = 0x80;
     private const uint SerialPurgeTxClear = 0x04;
     private const uint SerialPurgeRxClear = 0x08;
     private const uint SerialCtsState = 0x00000010;
@@ -396,11 +397,17 @@ public sealed class Rfc2217Client
 
     public static byte MapInboundFlowControl(uint controlHandshake, uint flowReplace)
     {
-        return (controlHandshake & SerialDtrHandshake) != 0
-            ? (byte)18
-            : (flowReplace & SerialAutoReceive) != 0
-                ? (byte)15
-                : (byte)14;
+        if ((controlHandshake & SerialDtrHandshake) != 0)
+        {
+            return 18;
+        }
+
+        if ((flowReplace & SerialRtsHandshake) != 0)
+        {
+            return 16;
+        }
+
+        return (flowReplace & SerialAutoReceive) != 0 ? (byte)15 : (byte)14;
     }
 
     public static bool IsOutboundFlowControlValue(byte value)
