@@ -215,6 +215,7 @@
                     <ListView x:Name="ComPairsList"
                               Grid.Row="0"
                               SelectionMode="Single"
+                              SelectionChanged="ComPairsList_SelectionChanged"
                               PreviewMouseRightButtonDown="ComPairsList_PreviewMouseRightButtonDown">
                         <ListView.ContextMenu>
                             <ContextMenu>

@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private bool _serviceStartAttempted;
     private bool _dependencyPollActive;
     private bool _updatingLanguage;
+    private bool _updatingSelection;
     private UiLanguage _language = GuiText.DefaultLanguage;
 
     public MainWindow()
@@ -207,13 +208,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (row.IsKmdf)
-        {
-            await DeleteKmdfPortAsync(row.ToKmdfDeviceInfo());
-            return;
-        }
-
-        await DeleteCom0comPairAsync(row.ToInfo());
+        await DeleteComPortRowAsync(row);
     }
 
     private void ComPairsList_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
@@ -231,9 +226,32 @@ public partial class MainWindow : Window
         }
 
         list.SelectedItem = null;
+        UpdateMappingCommandState();
     }
 
-    private void MappingsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateMappingCommandState();
+    private void ComPairsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_updatingSelection && ComPairsList.SelectedItem is not null)
+        {
+            _updatingSelection = true;
+            MappingsGrid.SelectedItem = null;
+            _updatingSelection = false;
+        }
+
+        UpdateMappingCommandState();
+    }
+
+    private void MappingsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_updatingSelection && MappingsGrid.SelectedItem is not null)
+        {
+            _updatingSelection = true;
+            ComPairsList.SelectedItem = null;
+            _updatingSelection = false;
+        }
+
+        UpdateMappingCommandState();
+    }
 
     private async void MappingsGrid_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -261,6 +279,7 @@ public partial class MainWindow : Window
         }
 
         grid.SelectedItem = null;
+        UpdateMappingCommandState();
     }
 
     private void MappingsGrid_ContextMenuOpening(object sender, ContextMenuEventArgs e)
@@ -278,13 +297,19 @@ public partial class MainWindow : Window
     private void UpdateMappingCommandState()
     {
         var row = MappingsGrid.SelectedItem as MappingRow;
+        var port = ComPairsList.SelectedItem as ComPairRow;
         var canStart = row?.CanStart == true;
         var canStop = row?.CanStop == true;
-        var canDelete = row is not null;
+        var canUseMapping = row is not null;
+        var canUsePort = row is not null || port is not null;
 
-        DeleteMappingButton.IsEnabled = canDelete;
-        DeleteMappingMenuItem.IsEnabled = canDelete;
-        DeleteSelectedMappingMenuItem.IsEnabled = canDelete;
+        DeleteMappingButton.IsEnabled = canUseMapping;
+        DeleteMappingMenuItem.IsEnabled = canUseMapping;
+        DeleteSelectedMappingMenuItem.IsEnabled = canUseMapping;
+        CreatePairButton.IsEnabled = canUseMapping;
+        CreatePairMenuItem.IsEnabled = canUseMapping;
+        DeletePairButton.IsEnabled = canUsePort;
+        DeletePairMenuItem.IsEnabled = canUsePort;
         StartButton.IsEnabled = canStart;
         StopButton.IsEnabled = canStop;
         StartMappingCommandMenuItem.IsEnabled = canStart;
@@ -772,9 +797,15 @@ public partial class MainWindow : Window
 
     private async Task DeletePairForSelectedAsync()
     {
+        if (ComPairsList.SelectedItem is ComPairRow selectedPort)
+        {
+            await DeleteComPortRowAsync(selectedPort);
+            return;
+        }
+
         if (MappingsGrid.SelectedItem is not MappingRow row)
         {
-            ServiceStateText.Text = T("Status.SelectMappingFirst");
+            SetStatus(T("Status.SelectPairFirst"), "warn");
             return;
         }
 
@@ -803,6 +834,17 @@ public partial class MainWindow : Window
         {
             SetStatus(TF("Status.DeletePairFailed", ex.Message), "error");
         }
+    }
+
+    private async Task DeleteComPortRowAsync(ComPairRow row)
+    {
+        if (row.IsKmdf)
+        {
+            await DeleteKmdfPortAsync(row.ToKmdfDeviceInfo());
+            return;
+        }
+
+        await DeleteCom0comPairAsync(row.ToInfo());
     }
 
     private async Task DeleteCom0comPairAsync(Com0comPairInfo pair)
