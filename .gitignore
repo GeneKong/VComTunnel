@@ -7,3 +7,6 @@ obj/
 TestResults/
 artifacts/
 *.log
+drivers/**/x64/
+drivers/**/Win32/
+drivers/**/*.cer
