@@ -55,8 +55,8 @@ public sealed class KmdfTunnelSession : IDisposable
             throw new PlatformNotSupportedException("KMDF backend is only available on Windows.");
         }
 
-        _eventDriver = OpenDriver();
-        _commandDriver = OpenDriver();
+        _eventDriver = OpenDriver(_mapping.VisiblePort);
+        _commandDriver = OpenDriver(_mapping.VisiblePort);
         Attach();
 
         _tcp = new TcpClient();
@@ -93,24 +93,37 @@ public sealed class KmdfTunnelSession : IDisposable
         _stop.Dispose();
     }
 
-    private static SafeFileHandle OpenDriver()
+    public static string BuildControlDevicePath(string visiblePort)
     {
-        const string path = @"\\.\VComTunnelCtl0";
-        var handle = CreateFileW(
-            path,
-            GenericRead | GenericWrite,
-            FileShareRead | FileShareWrite,
-            IntPtr.Zero,
-            OpenExisting,
-            FileAttributeNormal,
-            IntPtr.Zero);
+        var normalized = KmdfDeviceManager.NormalizePortName(visiblePort);
+        return $@"\\.\VComTunnelCtl_{normalized}";
+    }
 
-        if (handle.IsInvalid)
+    private static SafeFileHandle OpenDriver(string visiblePort)
+    {
+        var attempted = new[] { BuildControlDevicePath(visiblePort), @"\\.\VComTunnelCtl0" };
+        foreach (var path in attempted)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not open KMDF control channel {path}.");
+            var handle = CreateFileW(
+                path,
+                GenericRead | GenericWrite,
+                FileShareRead | FileShareWrite,
+                IntPtr.Zero,
+                OpenExisting,
+                FileAttributeNormal,
+                IntPtr.Zero);
+
+            if (!handle.IsInvalid)
+            {
+                return handle;
+            }
+
+            handle.Dispose();
         }
 
-        return handle;
+        throw new Win32Exception(
+            Marshal.GetLastWin32Error(),
+            $"Could not open KMDF control channel for {visiblePort}. Tried: {string.Join(", ", attempted)}.");
     }
 
     private void Attach()

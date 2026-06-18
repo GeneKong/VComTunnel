@@ -1,6 +1,8 @@
 #include <initguid.h>
 #include "Driver.h"
 
+static volatile LONG g_DeviceIndex = -1;
+
 static VOID
 VctInitializeSerialDefaults(
     _In_ PDEVICE_CONTEXT Context
@@ -82,10 +84,25 @@ VctCreateControlLink(
 {
     UNICODE_STRING deviceName;
     UNICODE_STRING controlLink;
+    UNICODE_STRING legacyControlLink;
+    NTSTATUS status;
 
-    RtlInitUnicodeString(&deviceName, VCOMTUNNEL_NT_DEVICE_NAME);
-    RtlInitUnicodeString(&controlLink, VCOMTUNNEL_CONTROL_LINK);
+    status = RtlStringCchPrintfW(
+        Context->ControlLinkName,
+        RTL_NUMBER_OF(Context->ControlLinkName),
+        L"%ws%ws",
+        VCOMTUNNEL_CONTROL_LINK_PREFIX,
+        Context->PortName);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    RtlInitUnicodeString(&deviceName, Context->NtDeviceName);
+    RtlInitUnicodeString(&controlLink, Context->ControlLinkName);
     Context->ControlLinkCreated = NT_SUCCESS(IoCreateSymbolicLink(&controlLink, &deviceName));
+
+    RtlInitUnicodeString(&legacyControlLink, VCOMTUNNEL_LEGACY_CONTROL_LINK);
+    Context->LegacyControlLinkCreated = NT_SUCCESS(IoCreateSymbolicLink(&legacyControlLink, &deviceName));
 }
 
 static VOID
@@ -106,9 +123,31 @@ VctRegisterSerialCommName(
         return;
     }
 
-    RtlInitUnicodeString(&valueName, VCOMTUNNEL_NT_DEVICE_NAME);
+    RtlInitUnicodeString(&valueName, Context->NtDeviceName);
     RtlInitUnicodeString(&portName, Context->PortName);
     WdfRegistryAssignUnicodeString(key, &valueName, &portName);
+    WdfRegistryClose(key);
+}
+
+static VOID
+VctUnregisterSerialCommName(
+    _In_ WDFDEVICE Device,
+    _In_ PDEVICE_CONTEXT Context
+    )
+{
+    NTSTATUS status;
+    WDFKEY key;
+    UNICODE_STRING keyName;
+    UNICODE_STRING valueName;
+
+    RtlInitUnicodeString(&keyName, L"SERIALCOMM");
+    status = WdfDeviceOpenDevicemapKey(Device, &keyName, KEY_SET_VALUE, WDF_NO_OBJECT_ATTRIBUTES, &key);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    RtlInitUnicodeString(&valueName, Context->NtDeviceName);
+    WdfRegistryRemoveValue(key, &valueName);
     WdfRegistryClose(key);
 }
 
@@ -119,12 +158,20 @@ VctEvtDeviceContextCleanup(
 {
     PDEVICE_CONTEXT context;
     UNICODE_STRING controlLink;
+    UNICODE_STRING legacyControlLink;
 
     context = DeviceGetContext((WDFDEVICE)Object);
+    VctUnregisterSerialCommName((WDFDEVICE)Object, context);
     if (context->ControlLinkCreated) {
-        RtlInitUnicodeString(&controlLink, VCOMTUNNEL_CONTROL_LINK);
+        RtlInitUnicodeString(&controlLink, context->ControlLinkName);
         IoDeleteSymbolicLink(&controlLink);
         context->ControlLinkCreated = FALSE;
+    }
+
+    if (context->LegacyControlLinkCreated) {
+        RtlInitUnicodeString(&legacyControlLink, VCOMTUNNEL_LEGACY_CONTROL_LINK);
+        IoDeleteSymbolicLink(&legacyControlLink);
+        context->LegacyControlLinkCreated = FALSE;
     }
 }
 
@@ -138,6 +185,8 @@ VctEvtDeviceAdd(
     WDFDEVICE device;
     WDF_OBJECT_ATTRIBUTES deviceAttributes;
     WDF_FILEOBJECT_CONFIG fileConfig;
+    LONG deviceIndex;
+    WCHAR ntDeviceNameBuffer[64];
     UNICODE_STRING ntDeviceName;
     UNICODE_STRING sddl;
     PDEVICE_CONTEXT context;
@@ -147,7 +196,17 @@ VctEvtDeviceAdd(
     WdfDeviceInitSetDeviceType(DeviceInit, FILE_DEVICE_SERIAL_PORT);
     WdfDeviceInitSetIoType(DeviceInit, WdfDeviceIoBuffered);
     WdfDeviceInitSetCharacteristics(DeviceInit, FILE_DEVICE_SECURE_OPEN, FALSE);
-    RtlInitUnicodeString(&ntDeviceName, VCOMTUNNEL_NT_DEVICE_NAME);
+    deviceIndex = InterlockedIncrement(&g_DeviceIndex);
+    status = RtlStringCchPrintfW(
+        ntDeviceNameBuffer,
+        RTL_NUMBER_OF(ntDeviceNameBuffer),
+        L"\\Device\\VComTunnelSerial%ld",
+        deviceIndex);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    RtlInitUnicodeString(&ntDeviceName, ntDeviceNameBuffer);
     status = WdfDeviceInitAssignName(DeviceInit, &ntDeviceName);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -172,6 +231,7 @@ VctEvtDeviceAdd(
 
     context = DeviceGetContext(device);
     VctInitializeSerialDefaults(context);
+    RtlStringCchCopyW(context->NtDeviceName, RTL_NUMBER_OF(context->NtDeviceName), ntDeviceNameBuffer);
     VctReadAssignedPortName(device, context);
 
     status = WdfSpinLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &context->Lock);

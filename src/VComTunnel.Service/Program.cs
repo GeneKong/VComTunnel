@@ -32,6 +32,7 @@ internal static class VComTunnelHost
         builder.Services.AddSingleton<Hub4comCommandBuilder>();
         builder.Services.AddSingleton<IComPortInventory, WindowsComPortInventory>();
         builder.Services.AddSingleton<Com0comSetupManager>();
+        builder.Services.AddSingleton<KmdfDeviceManager>();
         builder.Services.AddSingleton<InMemoryLog>();
         builder.Services.AddSingleton<TunnelOrchestrator>();
         builder.Services.AddHostedService<AutoStartHostedService>();
@@ -193,6 +194,50 @@ internal static class VComTunnelHost
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
+        });
+
+        app.MapGet("/api/kmdf/devices", (KmdfDeviceManager devices) =>
+        {
+            try
+            {
+                return Results.Ok(devices.GetDevices());
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
+        app.MapPost("/api/kmdf/ports/add", (
+            KmdfPortRequest request,
+            KmdfDeviceManager devices,
+            InMemoryLog log) =>
+        {
+            var result = devices.AddPort(request);
+            if (result.Success)
+            {
+                log.Info("kmdf", result.Message);
+                return Results.Ok(result);
+            }
+
+            log.Error("kmdf", result.Message);
+            return Results.BadRequest(result);
+        });
+
+        app.MapPost("/api/kmdf/ports/remove", (
+            KmdfPortRequest request,
+            KmdfDeviceManager devices,
+            InMemoryLog log) =>
+        {
+            var result = devices.RemovePort(request);
+            if (result.Success)
+            {
+                log.Info("kmdf", result.Message);
+                return Results.Ok(result);
+            }
+
+            log.Error("kmdf", result.Message);
+            return Results.BadRequest(result);
         });
 
         await app.RunAsync(cancellationToken);

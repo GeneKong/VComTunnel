@@ -493,6 +493,19 @@ public partial class MainWindow : Window
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    private static string? ResolveCliPath()
+    {
+        var baseDirectory = AppContext.BaseDirectory;
+        var candidates = new[]
+        {
+            Path.Combine(baseDirectory, "VComTunnel.Cli.exe"),
+            Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "..", "VComTunnel.Cli", "bin", "Debug", "net8.0", "VComTunnel.Cli.exe")),
+            Path.GetFullPath(Path.Combine(baseDirectory, "..", "..", "..", "..", "VComTunnel.Cli", "bin", "Release", "net8.0", "VComTunnel.Cli.exe"))
+        };
+
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
     private string BuildOfflineMessage(Exception ex)
     {
         return TF("Diag.Offline", ex.Message);
@@ -682,8 +695,10 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var pairs = await RefreshComPairsListAsync(updateDetails: true);
-            SetStatus(TF("Status.FoundPairs", pairs.Count));
+            var pairs = await RefreshComPairsListAsync(updateDetails: false);
+            var devices = await GetKmdfDevicesAsync();
+            DependenciesText.Text = FormatComPortInventory(pairs, devices);
+            SetStatus(TF("Status.FoundPorts", pairs.Count, devices.Count));
         }
         catch (Exception ex)
         {
@@ -703,7 +718,7 @@ public partial class MainWindow : Window
         {
             if (row.IsKmdf)
             {
-                SetStatus(T("Status.KmdfUnsupported"));
+                await CreateKmdfPortForSelectedAsync(row);
                 return;
             }
 
@@ -758,6 +773,12 @@ public partial class MainWindow : Window
 
         try
         {
+            if (row.IsKmdf)
+            {
+                await DeleteKmdfPortForSelectedAsync(row);
+                return;
+            }
+
             CommitGridEdits();
             var pairs = await _client.GetFromJsonAsync<List<Com0comPairInfo>>("/api/com0com/pairs", JsonOptions) ?? [];
             SetComPairs(pairs);
@@ -835,7 +856,7 @@ public partial class MainWindow : Window
     {
         if (row.IsKmdf)
         {
-            return true;
+            return await EnsureKmdfPortExistsBeforeStartAsync(row);
         }
 
         var pairs = await RefreshComPairsListAsync(updateDetails: false);
@@ -880,6 +901,175 @@ public partial class MainWindow : Window
         }
 
         SetStatus(T("Status.PairCreationNotDetected"), "warn");
+        return false;
+    }
+
+    private async Task CreateKmdfPortForSelectedAsync(MappingRow row)
+    {
+        CommitGridEdits();
+        if (!await SaveMappingsAsync())
+        {
+            return;
+        }
+
+        var devices = await GetKmdfDevicesAsync();
+        if (devices.Any(device => PortEquals(device.PortName, row.VisiblePort)))
+        {
+            SetStatus(TF("Status.KmdfPortExists", row.VisiblePort));
+            DependenciesText.Text = FormatComPortInventory(await RefreshComPairsListAsync(updateDetails: false), devices);
+            return;
+        }
+
+        var answer = MessageBox.Show(
+            TF("Prompt.CreateKmdfPort", row.VisiblePort),
+            T("Title.KmdfPort"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        if (!LaunchKmdfCtl("add", row.VisiblePort))
+        {
+            return;
+        }
+
+        SetStatus(TF("Status.WaitingKmdfPortAppear", row.VisiblePort));
+        if (await WaitForKmdfPortAsync(row.VisiblePort, shouldExist: true, TimeSpan.FromSeconds(60)))
+        {
+            SetStatus(TF("Status.CreatedKmdfPort", row.VisiblePort));
+            return;
+        }
+
+        SetStatus(TF("Status.KmdfPortCreationNotDetected", row.VisiblePort), "warn");
+    }
+
+    private async Task DeleteKmdfPortForSelectedAsync(MappingRow row)
+    {
+        CommitGridEdits();
+        var devices = await GetKmdfDevicesAsync();
+        var device = devices.FirstOrDefault(candidate => PortEquals(candidate.PortName, row.VisiblePort));
+        if (device is null)
+        {
+            DependenciesText.Text = FormatComPortInventory(await RefreshComPairsListAsync(updateDetails: false), devices);
+            SetStatus(TF("Status.NoKmdfPortMatches", row.VisiblePort), "warn");
+            return;
+        }
+
+        var answer = MessageBox.Show(
+            TF("Prompt.DeleteKmdfPort", device.PortName, device.InstanceId),
+            T("Title.KmdfPort"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+        if (answer != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        if (!LaunchKmdfCtl("remove", device.PortName))
+        {
+            return;
+        }
+
+        SetStatus(TF("Status.WaitingKmdfPortRemoved", device.PortName));
+        if (await WaitForKmdfPortAsync(device.PortName, shouldExist: false, TimeSpan.FromSeconds(60)))
+        {
+            SetStatus(TF("Status.DeletedKmdfPort", device.PortName));
+            return;
+        }
+
+        SetStatus(TF("Status.DeleteKmdfPortStillListed", device.PortName), "warn");
+    }
+
+    private async Task<bool> EnsureKmdfPortExistsBeforeStartAsync(MappingRow row)
+    {
+        var devices = await GetKmdfDevicesAsync();
+        if (devices.Any(device => PortEquals(device.PortName, row.VisiblePort)))
+        {
+            return true;
+        }
+
+        DependenciesText.Text = FormatComPortInventory(await RefreshComPairsListAsync(updateDetails: false), devices);
+        var answer = MessageBox.Show(
+            TF("Prompt.MissingKmdfPort", row.VisiblePort),
+            T("Title.KmdfPort"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes)
+        {
+            SetStatus(TF("Status.StartCanceledMissingKmdfPort", row.VisiblePort), "warn");
+            return false;
+        }
+
+        if (!LaunchKmdfCtl("add", row.VisiblePort))
+        {
+            return false;
+        }
+
+        SetStatus(TF("Status.WaitingKmdfPortAppear", row.VisiblePort));
+        if (await WaitForKmdfPortAsync(row.VisiblePort, shouldExist: true, TimeSpan.FromSeconds(60)))
+        {
+            SetStatus(TF("Status.CreatedKmdfPortStarting", row.VisiblePort));
+            return true;
+        }
+
+        SetStatus(TF("Status.KmdfPortCreationNotDetected", row.VisiblePort), "warn");
+        return false;
+    }
+
+    private bool LaunchKmdfCtl(string action, string portName)
+    {
+        var cliPath = ResolveCliPath();
+        if (cliPath is null)
+        {
+            SetStatus(T("Status.KmdfCliNotFound"), "error");
+            return false;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = cliPath,
+                Arguments = $"kmdf {action} {portName}",
+                WorkingDirectory = Path.GetDirectoryName(cliPath) ?? AppContext.BaseDirectory,
+                UseShellExecute = true,
+                Verb = "runas"
+            });
+            SetStatus(TF("Status.LaunchKmdfCtl", action, portName));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.LaunchKmdfCtlFailed", ex.Message), "error");
+            return false;
+        }
+    }
+
+    private async Task<bool> WaitForKmdfPortAsync(string portName, bool shouldExist, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            try
+            {
+                var devices = await GetKmdfDevicesAsync();
+                var exists = devices.Any(device => PortEquals(device.PortName, portName));
+                DependenciesText.Text = FormatComPortInventory(await RefreshComPairsListAsync(updateDetails: false), devices);
+                if (exists == shouldExist)
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                SetStatus(TF("Status.KmdfPortRefreshFailed", ex.Message), "warn");
+                return false;
+            }
+        }
+
         return false;
     }
 
@@ -943,10 +1133,26 @@ public partial class MainWindow : Window
         SetComPairs(pairs);
         if (updateDetails)
         {
-            DependenciesText.Text = FormatCom0comPairs(pairs);
+            DependenciesText.Text = FormatComPortInventory(pairs, await GetKmdfDevicesAsync());
         }
 
         return pairs;
+    }
+
+    private async Task<IReadOnlyList<KmdfDeviceInfo>> GetKmdfDevicesAsync()
+    {
+        try
+        {
+            if (await IsServiceReadyAsync())
+            {
+                return await _client.GetFromJsonAsync<List<KmdfDeviceInfo>>("/api/kmdf/devices", JsonOptions) ?? [];
+            }
+        }
+        catch
+        {
+        }
+
+        return new KmdfDeviceManager().GetDevices();
     }
 
     private void SetComPairs(IReadOnlyList<Com0comPairInfo> pairs)
@@ -1270,6 +1476,41 @@ public partial class MainWindow : Window
         return builder.ToString();
     }
 
+    private string FormatComPortInventory(IReadOnlyList<Com0comPairInfo> pairs, IReadOnlyList<KmdfDeviceInfo> devices)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine(FormatCom0comPairs(pairs).TrimEnd());
+        builder.AppendLine();
+        builder.AppendLine(FormatKmdfDevices(devices).TrimEnd());
+        return builder.ToString();
+    }
+
+    private string FormatKmdfDevices(IReadOnlyList<KmdfDeviceInfo> devices)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine(T("Diag.KmdfPortsTitle"));
+        builder.AppendLine();
+        if (devices.Count == 0)
+        {
+            builder.AppendLine(T("Diag.NoKmdfPorts"));
+            return builder.ToString();
+        }
+
+        foreach (var device in devices)
+        {
+            builder.AppendLine(TF("Diag.KmdfPortLine", device.PortName, device.Status, device.DriverName ?? ""));
+            builder.AppendLine($"  {device.InstanceId}");
+            if (!string.IsNullOrWhiteSpace(device.PortName))
+            {
+                builder.AppendLine($"  {TF("Diag.KmdfControl", KmdfTunnelSession.BuildControlDevicePath(device.PortName))}");
+                builder.AppendLine($"  {TF("Diag.KmdfDeleteCommand", device.PortName)}");
+            }
+            builder.AppendLine();
+        }
+
+        return builder.ToString();
+    }
+
     private string PairPortText(string? port, string missingKey)
     {
         return string.IsNullOrWhiteSpace(port) ? T(missingKey) : port;
@@ -1285,6 +1526,11 @@ public partial class MainWindow : Window
         return !string.IsNullOrWhiteSpace(port)
             && (string.Equals(pair.PortA, port, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(pair.PortB, port, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool PortEquals(string? left, string? right)
+    {
+        return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
     }
 
     private string FormatActionResult(string action, HttpResponseMessage response, string responseBody)

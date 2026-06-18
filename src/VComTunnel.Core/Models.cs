@@ -95,6 +95,25 @@ public sealed record Com0comPairInfo(
     string? DeviceB,
     bool IsComplete);
 
+public sealed record KmdfDeviceInfo(
+    string PortName,
+    string InstanceId,
+    string Status,
+    string? DriverName,
+    string? ProblemCode,
+    bool IsStarted);
+
+public sealed record KmdfPortRequest(
+    string PortName,
+    string? InstanceId = null,
+    string? InfPath = null);
+
+public sealed record KmdfPortOperationResult(
+    bool Success,
+    string Message,
+    KmdfDeviceInfo? Device,
+    bool RebootRequired);
+
 public sealed record SetupcCommandPlan(
     string FileName,
     string? WorkingDirectory,
@@ -105,4 +124,5 @@ public sealed record SetupcCommandPlan(
 [JsonSerializable(typeof(VComTunnelConfig))]
 [JsonSerializable(typeof(TunnelMapping))]
 [JsonSerializable(typeof(List<TunnelMapping>))]
+[JsonSerializable(typeof(KmdfPortRequest))]
 public partial class VComTunnelJsonContext : JsonSerializerContext;

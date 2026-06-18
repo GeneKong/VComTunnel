@@ -35,7 +35,15 @@ await Task.Delay(300, cts.Token);
 
 var payload = new byte[] { 0x56, 0x43, 0x54, 0xFF, 0x4F, 0x4B };
 using var serial = NativeSerial.Open(options.PortName);
-serial.Write(payload);
+try
+{
+    serial.Write(payload);
+}
+catch
+{
+    DumpLogs(log);
+    throw;
+}
 await Task.Delay(300, cts.Token);
 Console.WriteLine($"inQueue before read: {serial.GetInQueue()}");
 var received = await serial.ReadUntilAsync(payload.Length, TimeSpan.FromSeconds(options.ReadSeconds), cts.Token);
@@ -44,10 +52,7 @@ Console.WriteLine($"inQueue after read: {serial.GetInQueue()}");
 Console.WriteLine($"tx: {Convert.ToHexString(payload)}");
 Console.WriteLine($"rx: {Convert.ToHexString(received)}");
 var entries = log.Snapshot(20);
-foreach (var entry in entries)
-{
-    Console.WriteLine($"{entry.Level} {entry.Source}: {entry.Message}");
-}
+DumpLogEntries(entries);
 
 var hasTx = entries.Any(entry => entry.Message.Contains("KMDF TX event", StringComparison.OrdinalIgnoreCase));
 if (!hasTx)
@@ -87,6 +92,16 @@ else if (options.Remote)
 else
 {
     throw new InvalidOperationException("RFC2217 smoke echo mismatch.");
+}
+
+static void DumpLogs(InMemoryLog log) => DumpLogEntries(log.Snapshot(20));
+
+static void DumpLogEntries(IReadOnlyList<LogEntry> entries)
+{
+    foreach (var entry in entries)
+    {
+        Console.WriteLine($"{entry.Level} {entry.Source}: {entry.Message}");
+    }
 }
 
 internal sealed record SmokeOptions(

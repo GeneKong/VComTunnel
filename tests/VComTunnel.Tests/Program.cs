@@ -12,6 +12,8 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("COM backing port is accepted", () => Task.Run(ComBackingPortIsAccepted)),
     ("config round trip", ConfigRoundTripAsync),
     ("com0com create hints", () => Task.Run(Com0comCreateHints)),
+    ("KMDF control path uses visible COM", () => Task.Run(KmdfControlPathUsesVisibleCom)),
+    ("KMDF pnputil CSV parser finds VComTunnel ports", () => Task.Run(KmdfPnpUtilCsvParserFindsPorts)),
     ("com2tcp command uses batch wrapper", () => Task.Run(Com2TcpCommandUsesBatchWrapper)),
     ("missing dependencies fault mapping", MissingDependenciesFaultMappingAsync),
     ("missing backing port faults before hub4com", MissingBackingPortFaultsBeforeHub4comAsync),
@@ -145,6 +147,28 @@ static void Com0comCreateHints()
     var mapping = new TunnelMapping { Name = "A", VisiblePort = "COM12", BackingPort = "CNCB12" };
     var hint = new Hub4comCommandBuilder(new DependencyDetector()).BuildCom0comCreateHint(mapping);
     AssertEqual("setupc.exe install PortName=COM12 PortName=CNCB12", hint);
+}
+
+static void KmdfControlPathUsesVisibleCom()
+{
+    AssertEqual(@"\\.\VComTunnelCtl_COM27", KmdfTunnelSession.BuildControlDevicePath("com27"));
+}
+
+static void KmdfPnpUtilCsvParserFindsPorts()
+{
+    var csv = """
+InstanceId,DeviceDescription,ClassName,ClassGuid,ManufacturerName,Status,ProblemCode,ProblemStatus,DriverName,ExtensionDriverNames
+"USB\VID_303A&PID_1001\1","USB Serial Device (COM12)","Ports","{4d36e978-e325-11ce-bfc1-08002be10318}","Microsoft","Started","","","usbser.inf",""
+"ROOT\PORTS\0000","VComTunnel Virtual Serial Port (COM27)","Ports","{4d36e978-e325-11ce-bfc1-08002be10318}","VComTunnel","Started","","","oem117.inf",""
+"ROOT\PORTS\0001","VComTunnel Virtual Serial Port (COM31)","Ports","{4d36e978-e325-11ce-bfc1-08002be10318}","VComTunnel","Disconnected","22","","oem117.inf",""
+""";
+
+    var devices = KmdfDeviceManager.ParsePnpUtilDevicesCsv(csv);
+    AssertEqual("2", devices.Count.ToString());
+    AssertEqual("COM27", devices[0].PortName);
+    AssertTrue(devices[0].IsStarted, "COM27 should be marked as started.");
+    AssertEqual("COM31", devices[1].PortName);
+    AssertEqual("22", devices[1].ProblemCode ?? "");
 }
 
 static void Com2TcpCommandUsesBatchWrapper()

@@ -112,7 +112,7 @@ VctCompleteCommStatus(
     RtlZeroMemory(&status, sizeof(status));
     status.HoldReasons = 0;
     status.AmountInInQueue = Context->RxCount;
-    status.AmountInOutQueue = 0;
+    status.AmountInOutQueue = Context->TxCount;
     status.EofReceived = FALSE;
     status.WaitForImmediate = FALSE;
 
@@ -171,6 +171,77 @@ VctRxCopyInLocked(
     return copied;
 }
 
+static ULONG
+VctTxCopyOutLocked(
+    _Inout_ PDEVICE_CONTEXT Context,
+    _Out_writes_bytes_(Length) UCHAR* Buffer,
+    _In_ ULONG Length
+    )
+{
+    ULONG copied = 0;
+
+    while (copied < Length && Context->TxCount > 0) {
+        Buffer[copied] = Context->TxBuffer[Context->TxTail];
+        Context->TxTail = (Context->TxTail + 1) % VCOMTUNNEL_TX_QUEUE_SIZE;
+        Context->TxCount--;
+        copied++;
+    }
+
+    return copied;
+}
+
+static ULONG
+VctTxCopyInLocked(
+    _Inout_ PDEVICE_CONTEXT Context,
+    _In_reads_bytes_(Length) const UCHAR* Buffer,
+    _In_ ULONG Length
+    )
+{
+    ULONG copied = 0;
+
+    while (copied < Length && Context->TxCount < VCOMTUNNEL_TX_QUEUE_SIZE) {
+        Context->TxBuffer[Context->TxHead] = Buffer[copied];
+        Context->TxHead = (Context->TxHead + 1) % VCOMTUNNEL_TX_QUEUE_SIZE;
+        Context->TxCount++;
+        copied++;
+    }
+
+    return copied;
+}
+
+static NTSTATUS
+VctCompleteTxEventFromQueue(
+    _In_ WDFREQUEST Request,
+    _Inout_ PDEVICE_CONTEXT Context,
+    _In_ ULONG PayloadLength
+    )
+{
+    NTSTATUS status;
+    UCHAR* eventBuffer;
+    size_t eventBufferLength;
+    ULONG copied;
+    ULONG eventSize;
+    PVCT_EVENT_HEADER header;
+
+    eventSize = (ULONG)(sizeof(VCT_EVENT_HEADER) + PayloadLength);
+    status = WdfRequestRetrieveOutputBuffer(Request, eventSize, (PVOID*)&eventBuffer, &eventBufferLength);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    WdfSpinLockAcquire(Context->Lock);
+    copied = VctTxCopyOutLocked(Context, eventBuffer + sizeof(VCT_EVENT_HEADER), PayloadLength);
+    header = (PVCT_EVENT_HEADER)eventBuffer;
+    RtlZeroMemory(header, sizeof(*header));
+    header->Size = sizeof(VCT_EVENT_HEADER) + copied;
+    header->Type = VComTunnelEventTxData;
+    header->Sequence = ++Context->NextSequence;
+    WdfSpinLockRelease(Context->Lock);
+
+    WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, header->Size);
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 VctCompleteAttach(
     _In_ WDFREQUEST Request,
@@ -222,6 +293,7 @@ VctQueueServiceWait(
 {
     NTSTATUS status = STATUS_SUCCESS;
     WDFFILEOBJECT fileObject;
+    ULONG queuedBytes = 0;
 
     fileObject = WdfRequestGetFileObject(Request);
 
@@ -232,6 +304,8 @@ VctQueueServiceWait(
         status = STATUS_ACCESS_DENIED;
     } else if (Context->PendingServiceWait != NULL) {
         status = STATUS_DEVICE_BUSY;
+    } else if (Context->TxCount > 0) {
+        queuedBytes = min(Context->TxCount, (ULONG)(VCOMTUNNEL_MAX_EVENT_BYTES - sizeof(VCT_EVENT_HEADER)));
     } else {
         Context->PendingServiceWait = Request;
         status = WdfRequestMarkCancelableEx(Request, VctEvtRequestCancel);
@@ -242,6 +316,14 @@ VctQueueServiceWait(
         }
     }
     WdfSpinLockRelease(Context->Lock);
+
+    if (queuedBytes > 0) {
+        status = VctCompleteTxEventFromQueue(Request, Context, queuedBytes);
+        if (!NT_SUCCESS(status)) {
+            WdfRequestComplete(Request, status);
+        }
+        return STATUS_PENDING;
+    }
 
     if (Request != NULL) {
         WdfRequestComplete(Request, status);
@@ -620,6 +702,7 @@ VctEvtIoWrite(
     size_t inputLength;
     size_t eventBufferLength;
     ULONG eventSize;
+    ULONG copied;
     PVCT_EVENT_HEADER header;
 
     device = WdfIoQueueGetDevice(Queue);
@@ -636,15 +719,19 @@ VctEvtIoWrite(
         return;
     }
 
+    status = STATUS_DEVICE_NOT_READY;
     WdfSpinLockAcquire(context->Lock);
     if (context->ServiceAttached && context->PendingServiceWait != NULL) {
         serviceWait = context->PendingServiceWait;
         context->PendingServiceWait = NULL;
+    } else if (context->ServiceAttached) {
+        copied = VctTxCopyInLocked(context, inputBuffer, (ULONG)inputLength);
+        status = copied == inputLength ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL;
     }
     WdfSpinLockRelease(context->Lock);
 
     if (serviceWait == NULL) {
-        WdfRequestCompleteWithInformation(Request, STATUS_DEVICE_NOT_READY, 0);
+        WdfRequestCompleteWithInformation(Request, status, NT_SUCCESS(status) ? inputLength : 0);
         return;
     }
 

@@ -22,6 +22,7 @@ internal static class VComTunnelCtl
             "mappings" => await GetAsync("/api/mappings"),
             "ports" => await GetAsync("/api/com0com/pairs"),
             "pair" => await PairAsync(args.Skip(1).ToArray()),
+            "kmdf" => Kmdf(args.Skip(1).ToArray()),
             "start" => await PostMappingAsync(args.Skip(1).FirstOrDefault(), "start"),
             "stop" => await PostMappingAsync(args.Skip(1).FirstOrDefault(), "stop"),
             "logs" => await GetAsync("/api/logs"),
@@ -154,6 +155,98 @@ internal static class VComTunnelCtl
         }
     }
 
+    private static int Kmdf(string[] args)
+    {
+        var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "help";
+        var manager = new KmdfDeviceManager();
+        return action switch
+        {
+            "list" => ListKmdfPorts(manager),
+            "add" => AddKmdfPort(manager, args.Skip(1).FirstOrDefault(), args.Skip(2).FirstOrDefault()),
+            "remove" => RemoveKmdfPort(manager, args.Skip(1).FirstOrDefault()),
+            "inf" => PrintKmdfInf(args.Skip(1).FirstOrDefault()),
+            _ => KmdfHelp()
+        };
+    }
+
+    private static int ListKmdfPorts(KmdfDeviceManager manager)
+    {
+        try
+        {
+            var devices = manager.GetDevices();
+            if (devices.Count == 0)
+            {
+                Console.WriteLine("No VComTunnel KMDF COM ports found.");
+                return 0;
+            }
+
+            foreach (var device in devices)
+            {
+                Console.WriteLine($"{device.PortName,-7} {device.Status,-12} {device.InstanceId} {device.DriverName}");
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex.Message);
+            return 2;
+        }
+    }
+
+    private static int AddKmdfPort(KmdfDeviceManager manager, string? portName, string? infPath)
+    {
+        if (string.IsNullOrWhiteSpace(portName))
+        {
+            Console.WriteLine("Usage: vcomtunnelctl kmdf add COM27 [driver-inf]");
+            return 2;
+        }
+
+        var result = manager.AddPort(new KmdfPortRequest(portName, InfPath: infPath));
+        PrintKmdfResult(result);
+        return result.Success ? 0 : 2;
+    }
+
+    private static int RemoveKmdfPort(KmdfDeviceManager manager, string? portName)
+    {
+        if (string.IsNullOrWhiteSpace(portName))
+        {
+            Console.WriteLine("Usage: vcomtunnelctl kmdf remove COM27");
+            return 2;
+        }
+
+        var result = manager.RemovePort(new KmdfPortRequest(portName));
+        PrintKmdfResult(result);
+        return result.Success ? 0 : 2;
+    }
+
+    private static int PrintKmdfInf(string? explicitInfPath)
+    {
+        var infPath = KmdfDeviceManager.ResolveDriverInfPath(explicitInfPath);
+        if (infPath is null)
+        {
+            Console.WriteLine("VComTunnel.Serial install package was not found.");
+            return 2;
+        }
+
+        Console.WriteLine(infPath);
+        return 0;
+    }
+
+    private static void PrintKmdfResult(KmdfPortOperationResult result)
+    {
+        Console.WriteLine($"{(result.Success ? "OK" : "FAIL")} {result.Message}");
+        if (result.Device is not null)
+        {
+            Console.WriteLine($"{result.Device.PortName} {result.Device.Status} {result.Device.InstanceId} {result.Device.DriverName}");
+        }
+
+        if (result.RebootRequired)
+        {
+            Console.WriteLine("A reboot is required to finish this driver operation.");
+        }
+    }
+
     private static async Task<int> DepsAsync(string[] args)
     {
         var action = args.FirstOrDefault()?.ToLowerInvariant() ?? "help";
@@ -283,6 +376,9 @@ internal static class VComTunnelCtl
           ports                    List registered com0com pairs
           pair create-plan <id>    Print setupc plan for one mapping
           pair remove-plan <n>     Print setupc remove plan for pair number n
+          kmdf list                List VComTunnel KMDF COM ports
+          kmdf add COMx [inf]      Create a KMDF COM port with administrator approval
+          kmdf remove COMx         Remove a KMDF COM port with administrator approval
           start <mappingId>        Start one configured mapping
           stop <mappingId>         Stop one configured mapping
           logs                     Read /api/logs from the local service
@@ -308,6 +404,12 @@ internal static class VComTunnelCtl
     private static int PairHelp()
     {
         Console.WriteLine("Usage: vcomtunnelctl pair create-plan <mappingId> | remove-plan <pairNumber>");
+        return 0;
+    }
+
+    private static int KmdfHelp()
+    {
+        Console.WriteLine("Usage: vcomtunnelctl kmdf list | add COM27 [driver-inf] | remove COM27 | inf [driver-inf]");
         return 0;
     }
 
