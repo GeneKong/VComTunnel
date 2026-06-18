@@ -34,9 +34,9 @@ stats, baud-rate, line-control, raw modem control, DTR/RTS reset-style pulses,
 CTS/RTS handflow, BREAK, purge, XOFF/XON, immediate-char echo, and the RFC2217
 frames emitted by those controls.
 The local fake server also injects RFC2217 modem/line-state notifications and
-checks that they appear through local serial status IOCTLs. The RFC2217 client
-requests full hub4com-style line/modem-state masks while tolerating ACKs for
-subsets that the remote endpoint actually supports.
+checks that they appear through local serial status IOCTLs and wait-mask events.
+The RFC2217 client requests full hub4com-style line/modem-state masks while
+tolerating ACKs for subsets that the remote endpoint actually supports.
 Remote smoke skips those extra probes unless `--control-ioctls` is passed.
 When the KMDF driver is not installed or needs a protocol update, probe an
 RFC2217 endpoint directly without opening a COM port:

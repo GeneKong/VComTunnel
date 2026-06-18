@@ -87,28 +87,29 @@ if (options.ControlIoctls)
 
 try
 {
+    var writeStarted = DateTimeOffset.UtcNow;
     serial.Write(payload);
+    await WaitForLogAsync(
+        log,
+        entry => entry.Timestamp >= writeStarted &&
+            entry.Message.Contains($"KMDF TX event {payload.Length} byte(s).", StringComparison.OrdinalIgnoreCase),
+        $"KMDF TX event {payload.Length} byte(s)",
+        TimeSpan.FromSeconds(options.ReadSeconds),
+        cts.Token);
 }
 catch
 {
     DumpLogs(log);
     throw;
 }
-await Task.Delay(300, cts.Token);
 Console.WriteLine($"inQueue before read: {serial.GetInQueue()}");
 var received = await serial.ReadUntilAsync(payload.Length, TimeSpan.FromSeconds(options.ReadSeconds), cts.Token);
 Console.WriteLine($"inQueue after read: {serial.GetInQueue()}");
 
 Console.WriteLine($"tx: {Convert.ToHexString(payload)}");
 Console.WriteLine($"rx: {Convert.ToHexString(received)}");
-var entries = log.Snapshot(80);
+var entries = log.Snapshot(160);
 DumpLogEntries(entries);
-
-var hasTx = entries.Any(entry => entry.Message.Contains("KMDF TX event", StringComparison.OrdinalIgnoreCase));
-if (!hasTx)
-{
-    throw new InvalidOperationException("KMDF did not report a TX event.");
-}
 
 if (options.ExpectEcho && !payload.SequenceEqual(received))
 {
@@ -527,6 +528,32 @@ static void DumpProbeExchange(Rfc2217ProbeExchange exchange)
 
 static void DumpLogs(InMemoryLog log) => DumpLogEntries(log.Snapshot(80));
 
+static async Task<LogEntry> WaitForLogAsync(
+    InMemoryLog log,
+    Func<LogEntry, bool> predicate,
+    string description,
+    TimeSpan timeout,
+    CancellationToken cancellationToken)
+{
+    var deadline = DateTimeOffset.UtcNow + timeout;
+    while (DateTimeOffset.UtcNow < deadline)
+    {
+        var match = log.Snapshot(1000).FirstOrDefault(predicate);
+        if (match is not null)
+        {
+            return match;
+        }
+
+        await Task.Delay(20, cancellationToken);
+    }
+
+    var recent = log.Snapshot(10);
+    var details = recent.Count == 0
+        ? "none"
+        : string.Join(" | ", recent.Select(entry => $"{entry.Level} {entry.Source}: {entry.Message}"));
+    throw new InvalidOperationException($"Timed out waiting for log entry '{description}'. Recent logs: {details}.");
+}
+
 static async Task<int> ExerciseControlIoctlsAsync(
     NativeSerial serial,
     FakeRfc2217Probe? probe,
@@ -555,6 +582,7 @@ static async Task<int> ExerciseControlIoctlsAsync(
     serial.ValidateCommConfig();
     serial.SetQueueSize(4096, 4096);
     await WaitForRemoteNotificationsAsync(serial, probe, readTimeout, cancellationToken);
+    await VerifyRemoteWaitMaskAsync(serial, probe, readTimeout, cancellationToken);
 
     serial.SetBaudRate(115200);
     await WaitForRfc2217Async(
@@ -807,6 +835,59 @@ static async Task WaitForRemoteNotificationsAsync(
     Console.WriteLine($"remote notifications: modem=0x{modemStatus:X8} errors=0x{lineErrors:X8}");
 }
 
+static async Task VerifyRemoteWaitMaskAsync(
+    NativeSerial serial,
+    FakeRfc2217Probe? probe,
+    TimeSpan timeout,
+    CancellationToken cancellationToken)
+{
+    if (probe is null)
+    {
+        return;
+    }
+
+    var modemMask = NativeSerial.EvCts | NativeSerial.EvDsr | NativeSerial.EvRlsd | NativeSerial.EvRing;
+    serial.SetWaitMask(modemMask);
+    if (serial.GetWaitMask() != modemMask)
+    {
+        throw new InvalidOperationException($"Failed to set modem wait mask 0x{modemMask:X8}.");
+    }
+
+    var modemWait = serial.WaitOnMaskAsync(timeout, cancellationToken);
+    probe.QueueRemoteNotification(Rfc2217Client.NotifyModemState, [0x0F]);
+    var modemEvents = await modemWait;
+    if ((modemEvents & modemMask) != modemMask)
+    {
+        throw new InvalidOperationException($"Remote modem wait-mask mismatch: 0x{modemEvents:X8}, expected 0x{modemMask:X8}.");
+    }
+
+    probe.QueueRemoteNotification(Rfc2217Client.NotifyModemState, [0xF0]);
+    await serial.WaitForModemStatusAsync(NativeSerial.ExpectedRemoteModemStatus, timeout, cancellationToken);
+
+    var lineMask = NativeSerial.EvErr | NativeSerial.EvBreak;
+    serial.SetWaitMask(lineMask);
+    if (serial.GetWaitMask() != lineMask)
+    {
+        throw new InvalidOperationException($"Failed to set line wait mask 0x{lineMask:X8}.");
+    }
+
+    var lineWait = serial.WaitOnMaskAsync(timeout, cancellationToken);
+    probe.QueueRemoteNotification(Rfc2217Client.NotifyLineState, [0x1E]);
+    var lineEvents = await lineWait;
+    if ((lineEvents & lineMask) != lineMask)
+    {
+        throw new InvalidOperationException($"Remote line wait-mask mismatch: 0x{lineEvents:X8}, expected 0x{lineMask:X8}.");
+    }
+
+    serial.SetWaitMask(0);
+    if (serial.GetWaitMask() != 0)
+    {
+        throw new InvalidOperationException("Failed to clear wait mask.");
+    }
+
+    Console.WriteLine($"remote wait-mask: modem=0x{modemEvents:X8} line=0x{lineEvents:X8}");
+}
+
 static void DumpLogEntries(IReadOnlyList<LogEntry> entries)
 {
     foreach (var entry in entries)
@@ -916,6 +997,12 @@ internal sealed class NativeSerial : IDisposable
     public const uint SerialCtsHandshake = 0x00000008;
     public const uint SerialDcdHandshake = 0x00000020;
     public const uint SerialRtsHandshake = 0x00000080;
+    public const uint EvCts = 0x00000008;
+    public const uint EvDsr = 0x00000010;
+    public const uint EvRlsd = 0x00000020;
+    public const uint EvBreak = 0x00000040;
+    public const uint EvErr = 0x00000080;
+    public const uint EvRing = 0x00000100;
     public const uint ExpectedRemoteModemStatus = 0x000000F0;
     public const uint ExpectedRemoteLineErrors = 0x00000017;
 
@@ -1087,6 +1174,46 @@ internal sealed class NativeSerial : IDisposable
         DeviceIoControlChecked(IoctlSerialSetHandflow, input, null, "IOCTL_SERIAL_SET_HANDFLOW");
     }
 
+    public void SetWaitMask(uint waitMask)
+    {
+        DeviceIoControlChecked(IoctlSerialSetWaitMask, BitConverter.GetBytes(waitMask), null, "IOCTL_SERIAL_SET_WAIT_MASK");
+    }
+
+    public uint GetWaitMask()
+    {
+        var output = new byte[4];
+        DeviceIoControlChecked(IoctlSerialGetWaitMask, null, output, "IOCTL_SERIAL_GET_WAIT_MASK");
+        return BitConverter.ToUInt32(output);
+    }
+
+    public async Task<uint> WaitOnMaskAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var waitTask = Task.Run(() =>
+        {
+            var output = new byte[4];
+            DeviceIoControlChecked(IoctlSerialWaitOnMask, null, output, "IOCTL_SERIAL_WAIT_ON_MASK");
+            return BitConverter.ToUInt32(output);
+        });
+
+        try
+        {
+            return await waitTask.WaitAsync(timeout, cancellationToken);
+        }
+        catch
+        {
+            try
+            {
+                SetWaitMask(0);
+                await waitTask.WaitAsync(TimeSpan.FromSeconds(1), CancellationToken.None);
+            }
+            catch
+            {
+            }
+
+            throw;
+        }
+    }
+
     public void ClearStats()
     {
         DeviceIoControlChecked(IoctlSerialClearStats, null, null, "IOCTL_SERIAL_CLEAR_STATS");
@@ -1231,6 +1358,9 @@ internal sealed class NativeSerial : IDisposable
     private const uint IoctlSerialClrRts = (0x1Bu << 16) | (13u << 2);
     private const uint IoctlSerialSetXoff = (0x1Bu << 16) | (14u << 2);
     private const uint IoctlSerialSetXon = (0x1Bu << 16) | (15u << 2);
+    private const uint IoctlSerialGetWaitMask = (0x1Bu << 16) | (16u << 2);
+    private const uint IoctlSerialSetWaitMask = (0x1Bu << 16) | (17u << 2);
+    private const uint IoctlSerialWaitOnMask = (0x1Bu << 16) | (18u << 2);
     private const uint IoctlSerialPurge = (0x1Bu << 16) | (19u << 2);
     private const uint IoctlSerialSetHandflow = (0x1Bu << 16) | (25u << 2);
     private const uint IoctlSerialGetDtrRts = (0x1Bu << 16) | (30u << 2);
@@ -1285,6 +1415,8 @@ internal sealed class FakeRfc2217Probe
 {
     private readonly object _gate = new();
     private readonly List<Rfc2217Notification> _notifications = [];
+    private readonly Queue<Rfc2217Notification> _remoteNotifications = [];
+    private readonly SemaphoreSlim _remoteNotificationSignal = new(0);
 
     public void Record(Rfc2217Notification notification)
     {
@@ -1321,6 +1453,25 @@ internal sealed class FakeRfc2217Probe
         throw new InvalidOperationException($"Timed out waiting for RFC2217 {description}. Seen: {details}.");
     }
 
+    public void QueueRemoteNotification(byte command, params byte[] payload)
+    {
+        lock (_gate)
+        {
+            _remoteNotifications.Enqueue(new Rfc2217Notification(command, payload.ToArray()));
+        }
+
+        _remoteNotificationSignal.Release();
+    }
+
+    public async Task<Rfc2217Notification> WaitForQueuedRemoteNotificationAsync(CancellationToken cancellationToken)
+    {
+        await _remoteNotificationSignal.WaitAsync(cancellationToken);
+        lock (_gate)
+        {
+            return _remoteNotifications.Dequeue();
+        }
+    }
+
     private Rfc2217Notification[] Snapshot()
     {
         lock (_gate)
@@ -1342,57 +1493,126 @@ internal static class FakeRfc2217EchoServer
         {
             using var client = await listener.AcceptTcpClientAsync(cancellationToken);
             await using var stream = client.GetStream();
+            using var writeLock = new SemaphoreSlim(1, 1);
+            using var remoteSenderStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var remoteSender = probe is null
+                ? Task.CompletedTask
+                : SendQueuedRemoteNotificationsAsync(stream, probe, writeLock, remoteSenderStop.Token);
             var negotiation = new byte[] { 255, 251, 44, 255, 251, 1, 255, 253, 0, 255, 251, 0 };
-            await stream.WriteAsync(negotiation, cancellationToken);
-            await stream.FlushAsync(cancellationToken);
+            await WriteServerBytesAsync(stream, writeLock, negotiation, cancellationToken);
+            await FlushServerAsync(stream, writeLock, cancellationToken);
 
-            var parser = new Rfc2217Client();
-            var buffer = new byte[4096];
-            var sentStatusNotifications = false;
-            while (!cancellationToken.IsCancellationRequested)
+            try
             {
-                var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
-                if (read == 0)
+                var parser = new Rfc2217Client();
+                var buffer = new byte[4096];
+                var sentStatusNotifications = false;
+                while (!cancellationToken.IsCancellationRequested)
                 {
-                    return;
-                }
-
-                var frame = parser.ProcessNetworkBytes(buffer, read);
-                var replies = FilterFakeServerReplies(frame.Replies);
-                if (replies.Length > 0)
-                {
-                    await stream.WriteAsync(replies, cancellationToken);
-                }
-
-                foreach (var notification in frame.Notifications)
-                {
-                    probe?.Record(notification);
-                    var ack = BuildServerAck(notification);
-                    if (ack.Length > 0)
+                    var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                    if (read == 0)
                     {
-                        await stream.WriteAsync(ack, cancellationToken);
+                        return;
                     }
-                }
 
-                if (!sentStatusNotifications)
+                    var frame = parser.ProcessNetworkBytes(buffer, read);
+                    var replies = FilterFakeServerReplies(frame.Replies);
+                    if (replies.Length > 0)
+                    {
+                        await WriteServerBytesAsync(stream, writeLock, replies, cancellationToken);
+                    }
+
+                    foreach (var notification in frame.Notifications)
+                    {
+                        probe?.Record(notification);
+                        var ack = BuildServerAck(notification);
+                        if (ack.Length > 0)
+                        {
+                            await WriteServerBytesAsync(stream, writeLock, ack, cancellationToken);
+                        }
+                    }
+
+                    if (!sentStatusNotifications)
+                    {
+                        sentStatusNotifications = true;
+                        await WriteServerBytesAsync(stream, writeLock, BuildServerFrame(Rfc2217Client.NotifyModemState, [0xF0]), cancellationToken);
+                        await WriteServerBytesAsync(stream, writeLock, BuildServerFrame(Rfc2217Client.NotifyLineState, [0x1E]), cancellationToken);
+                    }
+
+                    if (frame.SerialData.Length > 0)
+                    {
+                        var echo = Rfc2217Client.EscapeSerialData(frame.SerialData, 0, frame.SerialData.Length);
+                        await WriteServerBytesAsync(stream, writeLock, echo, cancellationToken);
+                    }
+
+                    await FlushServerAsync(stream, writeLock, cancellationToken);
+                }
+            }
+            finally
+            {
+                remoteSenderStop.Cancel();
+                try
                 {
-                    sentStatusNotifications = true;
-                    await stream.WriteAsync(BuildServerFrame(Rfc2217Client.NotifyModemState, [0xF0]), cancellationToken);
-                    await stream.WriteAsync(BuildServerFrame(Rfc2217Client.NotifyLineState, [0x1E]), cancellationToken);
+                    await remoteSender;
                 }
-
-                if (frame.SerialData.Length > 0)
+                catch (OperationCanceledException)
                 {
-                    var echo = Rfc2217Client.EscapeSerialData(frame.SerialData, 0, frame.SerialData.Length);
-                    await stream.WriteAsync(echo, cancellationToken);
                 }
-
-                await stream.FlushAsync(cancellationToken);
+                catch (IOException)
+                {
+                }
             }
         }
         finally
         {
             listener.Stop();
+        }
+    }
+
+    private static async Task SendQueuedRemoteNotificationsAsync(
+        NetworkStream stream,
+        FakeRfc2217Probe probe,
+        SemaphoreSlim writeLock,
+        CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var notification = await probe.WaitForQueuedRemoteNotificationAsync(cancellationToken);
+            await WriteServerBytesAsync(stream, writeLock, BuildServerFrame(notification.Command, notification.Payload), cancellationToken);
+            await FlushServerAsync(stream, writeLock, cancellationToken);
+        }
+    }
+
+    private static async Task WriteServerBytesAsync(
+        NetworkStream stream,
+        SemaphoreSlim writeLock,
+        byte[] bytes,
+        CancellationToken cancellationToken)
+    {
+        await writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            await stream.WriteAsync(bytes, cancellationToken);
+        }
+        finally
+        {
+            writeLock.Release();
+        }
+    }
+
+    private static async Task FlushServerAsync(
+        NetworkStream stream,
+        SemaphoreSlim writeLock,
+        CancellationToken cancellationToken)
+    {
+        await writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            await stream.FlushAsync(cancellationToken);
+        }
+        finally
+        {
+            writeLock.Release();
         }
     }
 
