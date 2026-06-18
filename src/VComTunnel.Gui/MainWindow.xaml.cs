@@ -89,6 +89,10 @@ public partial class MainWindow : Window
         SetToolbarButton(ClearLogsButton, PackIconMaterialKind.Broom, "Action.ClearLogs");
 
         SetCommandMenuItem(RefreshMenuItem, PackIconMaterialKind.Refresh, "Action.Refresh");
+        SetCommandMenuItem(InstallServiceMenuItem, PackIconMaterialKind.Download, "Action.InstallService");
+        SetCommandMenuItem(UninstallServiceMenuItem, PackIconMaterialKind.DeleteOutline, "Action.UninstallService");
+        SetCommandMenuItem(StartServiceMenuItem, PackIconMaterialKind.Play, "Action.StartService");
+        SetCommandMenuItem(StopServiceMenuItem, PackIconMaterialKind.Stop, "Action.StopService");
         SetCommandMenuItem(RestartServiceMenuItem, PackIconMaterialKind.Restart, "Action.RestartService");
         SetCommandMenuItem(AddMenuItem, PackIconMaterialKind.Plus, "Action.Add");
         SetCommandMenuItem(SaveMenuItem, PackIconMaterialKind.ContentSave, "Action.Save");
@@ -171,6 +175,10 @@ public partial class MainWindow : Window
         await RefreshAsync();
     }
 
+    private async void InstallService_Click(object sender, RoutedEventArgs e) => await InstallServiceAsync();
+    private async void UninstallService_Click(object sender, RoutedEventArgs e) => await UninstallServiceAsync();
+    private async void StartService_Click(object sender, RoutedEventArgs e) => await StartServiceAndRefreshAsync(force: true);
+    private async void StopService_Click(object sender, RoutedEventArgs e) => await StopServiceAsync(confirm: true);
     private async void RestartService_Click(object sender, RoutedEventArgs e) => await RestartServiceAsync();
 
     private async void SetupDeps_Click(object sender, RoutedEventArgs e) => await SetupDependenciesAsync();
@@ -478,6 +486,99 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task InstallServiceAsync()
+    {
+        var answer = MessageBox.Show(
+            T("Prompt.InstallService"),
+            T("Menu.Service"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        var servicePath = ResolveServicePath();
+        if (servicePath is null)
+        {
+            SetStatus(T("Diag.ServiceNotFound"), "error");
+            return;
+        }
+
+        SetStatus(T("Status.ServiceInstalling"));
+        if (!await RunServiceCtlElevatedAsync("install", [servicePath]))
+        {
+            return;
+        }
+
+        StopLocalServiceProcesses();
+        await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(8));
+
+        if (await RunServiceCtlElevatedAsync("start", []))
+        {
+            if (await WaitForServiceAsync(TimeSpan.FromSeconds(12)))
+            {
+                await RefreshAsync();
+                SetStatus(T("Status.ServiceInstalled"));
+                return;
+            }
+        }
+
+        SetStatus(T("Status.ServiceInstalled"));
+    }
+
+    private async Task UninstallServiceAsync()
+    {
+        var answer = MessageBox.Show(
+            T("Prompt.UninstallService"),
+            T("Menu.Service"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+        if (answer != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        SetStatus(T("Status.ServiceUninstalling"));
+        await RunServiceCtlElevatedAsync("stop", []);
+        await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(10));
+        if (!await RunServiceCtlElevatedAsync("uninstall", []))
+        {
+            return;
+        }
+
+        SetStatus(T("Status.ServiceUninstalled"));
+        ClearComPairsList();
+    }
+
+    private async Task StopServiceAsync(bool confirm)
+    {
+        if (confirm)
+        {
+            var answer = MessageBox.Show(
+                T("Prompt.StopService"),
+                T("Menu.Service"),
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+            if (answer != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+
+        SetStatus(T("Status.ServiceStopping"));
+        await TryStopInstalledWindowsServiceAsync();
+        StopLocalServiceProcesses();
+        if (await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(10)))
+        {
+            SetStatus(T("Status.ServiceStopped"));
+            ClearComPairsList();
+            return;
+        }
+
+        SetStatus(T("Status.ServiceStopNotConfirmed"), "warn");
+    }
+
     private async Task StartServiceAndRefreshAsync(bool force)
     {
         if (_serviceStartAttempted && !force)
@@ -539,6 +640,55 @@ public partial class MainWindow : Window
         ClearComPairsList();
         DependenciesText.Text = TF("Diag.StartedButNotReady", servicePath);
         DependenciesText.Text += Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+    }
+
+    private async Task<bool> RunServiceCtlElevatedAsync(string action, IReadOnlyList<string> arguments)
+    {
+        var cliPath = ResolveCliPath();
+        if (cliPath is null)
+        {
+            SetStatus(T("Status.ServiceCliNotFound"), "error");
+            return false;
+        }
+
+        try
+        {
+            var argumentText = new StringBuilder($"service {action}");
+            foreach (var argument in arguments)
+            {
+                argumentText.Append(' ');
+                argumentText.Append(QuoteProcessArgument(argument));
+            }
+
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = cliPath,
+                Arguments = argumentText.ToString(),
+                WorkingDirectory = Path.GetDirectoryName(cliPath) ?? AppContext.BaseDirectory,
+                UseShellExecute = true,
+                Verb = "runas"
+            });
+            if (process is null)
+            {
+                SetStatus(TF("Status.ServiceControlFailed", action, $"Could not start {cliPath}."), "error");
+                return false;
+            }
+
+            SetStatus(TF("Status.ServiceControlLaunched", action));
+            await process.WaitForExitAsync();
+            if (process.ExitCode == 0)
+            {
+                return true;
+            }
+
+            SetStatus(TF("Status.ServiceControlFailed", action, $"exit code {process.ExitCode}"), "error");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.ServiceControlFailed", action, ex.Message), "error");
+            return false;
+        }
     }
 
     private async Task<bool> TryStartInstalledWindowsServiceAsync()
