@@ -26,6 +26,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("missing backing port faults before hub4com", MissingBackingPortFaultsBeforeHub4comAsync),
     ("com0com service backend starts without hub4com", Com0comServiceBackendStartsWithoutHub4comAsync),
     ("com0com service backend restarts after network fault", Com0comServiceBackendRestartsAfterNetworkFaultAsync),
+    ("com0com service backing open diagnostics", () => Task.Run(Com0comServiceBackingOpenDiagnostics)),
     ("com0com create and remove plans", Com0comCreateAndRemovePlansAsync),
     ("KMDF mapping reports startup fault", KmdfMappingReportsStartupFaultAsync),
     ("KMDF session restarts after network fault", KmdfSessionRestartsAfterNetworkFaultAsync),
@@ -720,6 +721,30 @@ static async Task Com0comServiceBackendRestartsAfterNetworkFaultAsync()
     AssertTrue(
         log.Snapshot().Any(e => e.Message.Contains("Scheduling Com0comService restart", StringComparison.OrdinalIgnoreCase)),
         "com0com service network fault should schedule a restart.");
+}
+
+static void Com0comServiceBackingOpenDiagnostics()
+{
+    var mapping = new TunnelMapping
+    {
+        Name = "Managed com0com",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM27",
+        BackingPort = "CNCB27",
+        Host = "127.0.0.1",
+        Port = 5000
+    };
+    var notFound = Com0comServiceTunnelSession.BuildBackingPortOpenError(
+        mapping,
+        new SerialPortOpenException("CNCB27", @"\\.\CNCB27", 2, "open"));
+    AssertStringContains(notFound, "ERROR 2");
+    AssertStringContains(notFound, "setupc.exe install PortName=COM27 PortName=CNCB27");
+
+    var accessDenied = Com0comServiceTunnelSession.BuildBackingPortOpenError(
+        mapping,
+        new SerialPortOpenException("CNCB27", @"\\.\CNCB27", 5, "open"));
+    AssertStringContains(accessDenied, "ERROR 5");
+    AssertStringContains(accessDenied, "already open");
 }
 
 static async Task KmdfMappingReportsStartupFaultAsync()

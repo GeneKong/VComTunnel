@@ -58,7 +58,15 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             throw new InvalidOperationException("backingPort is required for com0comService mappings.");
         }
 
-        _serial = _serialPorts.Open(_mapping.BackingPort);
+        try
+        {
+            _serial = _serialPorts.Open(_mapping.BackingPort);
+        }
+        catch (SerialPortOpenException ex)
+        {
+            throw new IOException(BuildBackingPortOpenError(_mapping, ex), ex);
+        }
+
         _tcp = new TcpClient();
         try
         {
@@ -451,6 +459,21 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             : $"{notification.Payload.Length} byte(s)";
     }
 
+    public static string BuildBackingPortOpenError(TunnelMapping mapping, SerialPortOpenException exception)
+    {
+        var pairHint = !string.IsNullOrWhiteSpace(mapping.BackingPort)
+            ? $" Mapping expects {mapping.VisiblePort} <-> {mapping.BackingPort}."
+            : "";
+        var createHint = !string.IsNullOrWhiteSpace(mapping.BackingPort)
+            ? $" If the pair is missing, create it first: setupc.exe install PortName={mapping.VisiblePort} PortName={mapping.BackingPort}."
+            : "";
+        var busyHint = exception.NativeErrorCode == 5
+            ? " ERROR 5 usually means the backing port is already open by another mapping, hub4com/com2tcp, or a serial tool; stop that process and retry."
+            : "";
+
+        return $"{exception.Message}{pairHint}{createHint}{busyHint}";
+    }
+
     private enum PendingAckResult
     {
         NotPending,
@@ -475,6 +498,27 @@ public interface ISerialPortEndpoint : IDisposable
 public interface ISerialPortEndpointFactory
 {
     ISerialPortEndpoint Open(string portName);
+}
+
+public sealed class SerialPortOpenException : IOException
+{
+    public SerialPortOpenException(string portName, string path, int nativeErrorCode, string operation)
+        : base(BuildMessage(path, nativeErrorCode, operation))
+    {
+        PortName = portName;
+        Path = path;
+        NativeErrorCode = nativeErrorCode;
+    }
+
+    public string PortName { get; }
+    public string Path { get; }
+    public int NativeErrorCode { get; }
+
+    private static string BuildMessage(string path, int nativeErrorCode, string operation)
+    {
+        var nativeMessage = new Win32Exception(nativeErrorCode).Message;
+        return $"Could not {operation} serial port {path}: ERROR {nativeErrorCode} - {nativeMessage}.";
+    }
 }
 
 public sealed class Win32SerialPortEndpointFactory : ISerialPortEndpointFactory
@@ -521,7 +565,7 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         {
             var error = Marshal.GetLastWin32Error();
             handle.Dispose();
-            throw new Win32Exception(error, $"Could not open serial port {path}.");
+            throw new SerialPortOpenException(portName, path, error, "open");
         }
 
         var timeouts = new CommTimeouts
@@ -536,7 +580,7 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         {
             var error = Marshal.GetLastWin32Error();
             handle.Dispose();
-            throw new Win32Exception(error, $"Could not configure serial port timeouts for {path}.");
+            throw new SerialPortOpenException(portName, path, error, "configure serial port timeouts for");
         }
 
         return new Win32SerialPortEndpoint(handle);
