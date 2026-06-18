@@ -44,6 +44,13 @@ dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -
 
 Add `--probe-settings` to also verify baud-rate and 8N1 line-control ACKs
 without toggling DTR, RTS, BREAK, or purge state.
+Add `--probe-controls` only on a safe target to verify DTR, RTS, BREAK, and
+purge ACKs; those controls can reset or disturb some connected boards.
+Use the built-in fake RFC2217 server to validate the full probe path locally:
+
+```powershell
+dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -- --probe-rfc2217 127.0.0.1 44000 3 --probe-settings --probe-controls --fake-server
+```
 
 ## Run
 
