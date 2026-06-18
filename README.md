@@ -42,6 +42,9 @@ RFC2217 endpoint directly without opening a COM port:
 dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -- --probe-rfc2217 10.0.2.196 5000
 ```
 
+Add `--probe-settings` to also verify baud-rate and 8N1 line-control ACKs
+without toggling DTR, RTS, BREAK, or purge state.
+
 ## Run
 
 Open the GUI. It will check `127.0.0.1:44817` and try to start the local service automatically if it is offline:
