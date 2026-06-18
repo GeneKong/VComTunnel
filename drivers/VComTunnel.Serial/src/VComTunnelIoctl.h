@@ -99,6 +99,7 @@ typedef struct _VCT_PURGE_EVENT {
 
 typedef struct _VCT_MODEM_STATE {
     ULONG ModemStatus;
+    ULONG EventMask;
 } VCT_MODEM_STATE, *PVCT_MODEM_STATE;
 
 typedef struct _VCT_LINE_STATE {

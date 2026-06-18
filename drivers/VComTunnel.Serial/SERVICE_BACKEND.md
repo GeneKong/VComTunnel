@@ -96,7 +96,8 @@ Current implementation note:
   stopped mapping stays stopped.
 - Wait-mask notifications currently cover RXCHAR, TXEMPTY, CTS, DSR, RLSD,
   RING, BREAK, and ERR events raised by service TX consumption, received bytes,
-  or RFC2217 modem/line notifications.
+  or RFC2217 modem/line notifications. RFC2217 modem notifications propagate
+  both current-state bits and explicit delta/edge event bits.
 - Remaining hardening: additional serial events beyond the current wait-mask
   subset and live hardware/tool compatibility validation.
 

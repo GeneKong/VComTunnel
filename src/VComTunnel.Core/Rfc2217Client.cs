@@ -50,6 +50,18 @@ public sealed class Rfc2217Client
     private const uint SerialAutoReceive = 0x02;
     private const uint SerialPurgeTxClear = 0x04;
     private const uint SerialPurgeRxClear = 0x08;
+    private const uint SerialCtsState = 0x00000010;
+    private const uint SerialDsrState = 0x00000020;
+    private const uint SerialRiState = 0x00000040;
+    private const uint SerialDcdState = 0x00000080;
+    private const uint SerialEvCts = 0x00000008;
+    private const uint SerialEvDsr = 0x00000010;
+    private const uint SerialEvRlsd = 0x00000020;
+    private const uint SerialEvRing = 0x00000100;
+    private const uint SerialErrorBreak = 0x00000001;
+    private const uint SerialErrorFraming = 0x00000002;
+    private const uint SerialErrorOverrun = 0x00000004;
+    private const uint SerialErrorParity = 0x00000010;
 
     private ParserState _state;
     private SubnegotiationState _subState;
@@ -325,6 +337,36 @@ public sealed class Rfc2217Client
             SerialPurgeRxClear | SerialPurgeTxClear => (byte)3,
             _ => (byte)0
         };
+    }
+
+    public static uint MapNotifyModemStateToWindowsStatus(byte value)
+    {
+        uint result = 0;
+        if ((value & 0x10) != 0) result |= SerialCtsState;
+        if ((value & 0x20) != 0) result |= SerialDsrState;
+        if ((value & 0x40) != 0) result |= SerialRiState;
+        if ((value & 0x80) != 0) result |= SerialDcdState;
+        return result;
+    }
+
+    public static uint MapNotifyModemStateToWindowsEvents(byte value)
+    {
+        uint result = 0;
+        if ((value & 0x01) != 0) result |= SerialEvCts;
+        if ((value & 0x02) != 0) result |= SerialEvDsr;
+        if ((value & 0x04) != 0) result |= SerialEvRing;
+        if ((value & 0x08) != 0) result |= SerialEvRlsd;
+        return result;
+    }
+
+    public static uint MapNotifyLineStateToWindowsErrors(byte value)
+    {
+        uint result = 0;
+        if ((value & 0x02) != 0) result |= SerialErrorOverrun;
+        if ((value & 0x04) != 0) result |= SerialErrorParity;
+        if ((value & 0x08) != 0) result |= SerialErrorFraming;
+        if ((value & 0x10) != 0) result |= SerialErrorBreak;
+        return result;
     }
 
     private static byte[] BuildSetDataSize(byte value) => BuildSubnegotiation(SetDataSize, value);

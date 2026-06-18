@@ -1057,12 +1057,13 @@ VctEvtIoDeviceControl(
         {
             VCT_MODEM_STATE modemState;
             ULONG oldModemStatus;
-            ULONG eventMask = 0;
+            ULONG eventMask;
 
             status = VctCopyInputBuffer(Request, &modemState, sizeof(modemState));
             if (NT_SUCCESS(status)) {
                 oldModemStatus = context->ModemStatus;
                 context->ModemStatus = modemState.ModemStatus;
+                eventMask = modemState.EventMask;
                 if ((oldModemStatus & SERIAL_CTS_STATE) != (modemState.ModemStatus & SERIAL_CTS_STATE)) {
                     eventMask |= SERIAL_EV_CTS;
                 }

@@ -325,14 +325,15 @@ public sealed class KmdfTunnelSession : IDisposable
 
         if (notification.Command == Rfc2217Client.NotifyModemState)
         {
-            var input = new byte[4];
-            WriteUInt32(input, 0, MapRfc2217ModemState(notification.Payload[0]));
+            var input = new byte[8];
+            WriteUInt32(input, 0, Rfc2217Client.MapNotifyModemStateToWindowsStatus(notification.Payload[0]));
+            WriteUInt32(input, 4, Rfc2217Client.MapNotifyModemStateToWindowsEvents(notification.Payload[0]));
             DeviceIoControlChecked(_commandDriver, IoctlSetModemState, input, null);
         }
         else if (notification.Command == Rfc2217Client.NotifyLineState)
         {
             var input = new byte[4];
-            WriteUInt32(input, 0, MapRfc2217LineErrors(notification.Payload[0]));
+            WriteUInt32(input, 0, Rfc2217Client.MapNotifyLineStateToWindowsErrors(notification.Payload[0]));
             DeviceIoControlChecked(_commandDriver, IoctlSetLineState, input, null);
         }
     }
@@ -489,36 +490,6 @@ public sealed class KmdfTunnelSession : IDisposable
     private void MarkNetworkActivity()
     {
         Interlocked.Exchange(ref _lastNetworkActivityTicks, Stopwatch.GetTimestamp());
-    }
-
-    private static uint MapRfc2217ModemState(byte value)
-    {
-        const uint serialCtsState = 0x00000010;
-        const uint serialDsrState = 0x00000020;
-        const uint serialRiState = 0x00000040;
-        const uint serialDcdState = 0x00000080;
-
-        uint result = 0;
-        if ((value & 0x10) != 0) result |= serialCtsState;
-        if ((value & 0x20) != 0) result |= serialDsrState;
-        if ((value & 0x40) != 0) result |= serialRiState;
-        if ((value & 0x80) != 0) result |= serialDcdState;
-        return result;
-    }
-
-    private static uint MapRfc2217LineErrors(byte value)
-    {
-        const uint serialErrorBreak = 0x00000001;
-        const uint serialErrorFraming = 0x00000002;
-        const uint serialErrorOverrun = 0x00000004;
-        const uint serialErrorParity = 0x00000010;
-
-        uint result = 0;
-        if ((value & 0x02) != 0) result |= serialErrorOverrun;
-        if ((value & 0x04) != 0) result |= serialErrorParity;
-        if ((value & 0x08) != 0) result |= serialErrorFraming;
-        if ((value & 0x10) != 0) result |= serialErrorBreak;
-        return result;
     }
 
     private Rfc2217OutboundFrame BuildNetworkFrame(ushort type, byte[] buffer, int offset, int length)

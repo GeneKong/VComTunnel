@@ -17,6 +17,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("RFC2217 command encoding", () => Task.Run(Rfc2217CommandEncoding)),
     ("RFC2217 telnet parser", () => Task.Run(Rfc2217TelnetParser)),
     ("RFC2217 ack semantics", () => Task.Run(Rfc2217AckSemantics)),
+    ("RFC2217 notification mappings", () => Task.Run(Rfc2217NotificationMappings)),
     ("com2tcp command uses batch wrapper", () => Task.Run(Com2TcpCommandUsesBatchWrapper)),
     ("missing dependencies fault mapping", MissingDependenciesFaultMappingAsync),
     ("missing backing port faults before hub4com", MissingBackingPortFaultsBeforeHub4comAsync),
@@ -278,6 +279,14 @@ static void Rfc2217AckSemantics()
     AssertEqual("17", Rfc2217Client.MapOutboundFlowControl(0x20, 0).ToString());
     AssertEqual("18", Rfc2217Client.MapInboundFlowControl(0x02, 0).ToString());
     AssertEqual("3", Rfc2217Client.MapPurge(0x0C).ToString());
+}
+
+static void Rfc2217NotificationMappings()
+{
+    AssertEqual("240", Rfc2217Client.MapNotifyModemStateToWindowsStatus(0xF0).ToString());
+    AssertEqual("312", Rfc2217Client.MapNotifyModemStateToWindowsEvents(0x0F).ToString());
+    AssertEqual("0", Rfc2217Client.MapNotifyModemStateToWindowsEvents(0xB0).ToString());
+    AssertEqual("23", Rfc2217Client.MapNotifyLineStateToWindowsErrors(0x1E).ToString());
 }
 
 static void Com2TcpCommandUsesBatchWrapper()

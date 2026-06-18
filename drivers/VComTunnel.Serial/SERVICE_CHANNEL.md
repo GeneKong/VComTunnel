@@ -193,6 +193,7 @@ RFC2217 notifications flow from service back to driver:
 ```c
 struct VCT_MODEM_STATE {
     UINT32 ModemStatus;
+    UINT32 EventMask;
 };
 
 struct VCT_LINE_STATE {
@@ -202,8 +203,11 @@ struct VCT_LINE_STATE {
 
 The service maps RFC2217 `NOTIFY-MODEMSTATE` current-state bits to Windows
 `SERIAL_CTS_STATE`, `SERIAL_DSR_STATE`, `SERIAL_RI_STATE`, and
-`SERIAL_DCD_STATE`. It maps RFC2217 `NOTIFY-LINESTATE` error bits to Windows
-serial error bits surfaced through `IOCTL_SERIAL_GET_COMMSTATUS`.
+`SERIAL_DCD_STATE`. It maps RFC2217 `NOTIFY-MODEMSTATE` delta bits to
+`SERIAL_EV_CTS`, `SERIAL_EV_DSR`, `SERIAL_EV_RING`, and `SERIAL_EV_RLSD` in
+`EventMask`; the driver also raises the same event bits when cached current
+state changes. It maps RFC2217 `NOTIFY-LINESTATE` error bits to Windows serial
+error bits surfaced through `IOCTL_SERIAL_GET_COMMSTATUS`.
 
 ## Ordering Rules
 
