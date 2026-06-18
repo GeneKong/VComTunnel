@@ -636,7 +636,7 @@ VctCompleteControlEventFromQueue(
     event = Context->EventQueue[Context->EventTail];
     Context->EventTail = (Context->EventTail + 1) % VCOMTUNNEL_EVENT_QUEUE_SIZE;
     Context->EventCount--;
-    signalTxEmpty = event.Type == VComTunnelEventTxData;
+    signalTxEmpty = event.Type == VComTunnelEventTxData && Context->TxCount == 0;
 
     header = (PVCT_EVENT_HEADER)eventBuffer;
     RtlZeroMemory(header, sizeof(*header));
