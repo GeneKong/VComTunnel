@@ -180,6 +180,42 @@ VctSignalWaitMaskEvent(
     }
 }
 
+static VOID
+VctApplyLocalPurge(
+    _Inout_ PDEVICE_CONTEXT Context,
+    _In_ ULONG PurgeMask
+    )
+{
+    WDFREQUEST readRequest = NULL;
+    BOOLEAN signalTxEmpty = FALSE;
+
+    WdfSpinLockAcquire(Context->Lock);
+    if ((PurgeMask & SERIAL_PURGE_RXCLEAR) != 0) {
+        Context->RxHead = 0;
+        Context->RxTail = 0;
+        Context->RxCount = 0;
+    }
+    if ((PurgeMask & SERIAL_PURGE_TXCLEAR) != 0) {
+        Context->TxHead = 0;
+        Context->TxTail = 0;
+        Context->TxCount = 0;
+        signalTxEmpty = TRUE;
+    }
+    if ((PurgeMask & SERIAL_PURGE_RXABORT) != 0 &&
+        Context->PendingRead != NULL) {
+        readRequest = Context->PendingRead;
+        Context->PendingRead = NULL;
+    }
+    WdfSpinLockRelease(Context->Lock);
+
+    if (readRequest != NULL) {
+        VctCompleteUnmarkedRequest(readRequest, STATUS_CANCELLED);
+    }
+    if (signalTxEmpty) {
+        VctSignalWaitMaskEvent(Context, SERIAL_EV_TXEMPTY);
+    }
+}
+
 static ULONG
 VctRxCopyOutLocked(
     _Inout_ PDEVICE_CONTEXT Context,
@@ -973,6 +1009,12 @@ VctEvtIoDeviceControl(
 
             status = VctCopyInputBuffer(Request, &purgeMask, sizeof(purgeMask));
             if (NT_SUCCESS(status)) {
+                if ((purgeMask & ~(SERIAL_PURGE_TXABORT | SERIAL_PURGE_RXABORT | SERIAL_PURGE_TXCLEAR | SERIAL_PURGE_RXCLEAR)) != 0) {
+                    status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+
+                VctApplyLocalPurge(context, purgeMask);
                 event.Mask = purgeMask;
                 VctQueueControlEvent(context, VComTunnelEventPurge, &event, sizeof(event));
             }

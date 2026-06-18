@@ -167,6 +167,7 @@ SetBaudRate / SetLineControl / SetModemControl / SetHandflow
      bounded timeout and one retry, faulting the tunnel on rejection or timeout
 
 Purge
+  -> clear local RX/TX queues
   -> translate RX/TX clear requests to RFC2217 PURGE-DATA and wait for ACK
 
 FLOWCONTROL-SUSPEND / FLOWCONTROL-RESUME
