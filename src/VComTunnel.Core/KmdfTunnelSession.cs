@@ -112,7 +112,8 @@ public sealed class KmdfTunnelSession : IDisposable
             new Rfc2217OutboundFrame(
                 _rfc2217.BuildInitialNegotiation(),
                 Rfc2217Client.BuildInitialExpectedAcks(),
-                "initial-negotiation")).ConfigureAwait(false);
+                "initial-negotiation",
+                ContinueOnAckTimeout: true)).ConfigureAwait(false);
 
         SetConnectionState(2);
         State = TunnelRunState.Running;
@@ -447,6 +448,12 @@ public sealed class KmdfTunnelSession : IDisposable
                 ClearPendingAckWait();
                 _log.Warn(_mapping.Name, $"RFC2217 {frame.Description} ack timed out{(attempt == 0 ? ", retrying" : "")}.");
             }
+        }
+
+        if (frame.ContinueOnAckTimeout)
+        {
+            _log.Warn(_mapping.Name, $"RFC2217 {frame.Description} ack timed out after retry; continuing with degraded remote-status notifications.");
+            return;
         }
 
         throw new IOException($"RFC2217 {frame.Description} ack timed out after retry.");
@@ -832,7 +839,11 @@ public sealed class KmdfTunnelSession : IDisposable
         Failed
     }
 
-    private sealed record Rfc2217OutboundFrame(byte[] Bytes, Rfc2217ExpectedAck[] ExpectedAckCommands, string Description);
+    private sealed record Rfc2217OutboundFrame(
+        byte[] Bytes,
+        Rfc2217ExpectedAck[] ExpectedAckCommands,
+        string Description,
+        bool ContinueOnAckTimeout = false);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern SafeFileHandle CreateFileW(

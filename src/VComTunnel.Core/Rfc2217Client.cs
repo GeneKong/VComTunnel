@@ -234,6 +234,25 @@ public sealed class Rfc2217Client
             BuildSetStopSize(MapWindowsStopBitsToRfc2217(stopBits)));
     }
 
+    public static byte[] BuildQuerySerialSettings()
+    {
+        return Combine(
+            BuildSetBaudRate(0),
+            BuildSetDataSize(0),
+            BuildSetParity(0),
+            BuildSetStopSize(0));
+    }
+
+    public static byte[] BuildQueryControlState()
+    {
+        return Combine(
+            BuildSetControl(0),
+            BuildSetControl(4),
+            BuildSetControl(7),
+            BuildSetControl(10),
+            BuildSetControl(13));
+    }
+
     public static byte[] BuildSetModemControl(bool? dtr, bool? rts)
     {
         var frames = new List<byte[]>();
@@ -308,6 +327,11 @@ public sealed class Rfc2217Client
 
     public static bool IsCompatibleSetControlAcceptedValue(byte requested, byte accepted)
     {
+        if (IsSetControlQueryValue(requested))
+        {
+            return IsCompatibleSetControlQueryResponse(requested, accepted);
+        }
+
         return IsOutboundFlowControlValue(requested) && IsOutboundFlowControlValue(accepted)
             || IsInboundFlowControlValue(requested) && IsInboundFlowControlValue(accepted);
     }
@@ -420,6 +444,24 @@ public sealed class Rfc2217Client
     public static bool IsInboundFlowControlValue(byte value)
     {
         return value is 14 or 15 or 16 or 18;
+    }
+
+    public static bool IsSetControlQueryValue(byte value)
+    {
+        return value is 0 or 4 or 7 or 10 or 13;
+    }
+
+    public static bool IsCompatibleSetControlQueryResponse(byte query, byte response)
+    {
+        return query switch
+        {
+            0 => IsOutboundFlowControlValue(response),
+            4 => response is 5 or 6,
+            7 => response is 8 or 9,
+            10 => response is 11 or 12,
+            13 => IsInboundFlowControlValue(response),
+            _ => false
+        };
     }
 
     public static byte MapPurge(uint purgeMask)

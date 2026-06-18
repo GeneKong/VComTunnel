@@ -251,6 +251,21 @@ static void Rfc2217CommandEncoding()
     AssertBytes(
         [0xFF, 0xFA, 0x2C, 0x00, 0x56, 0x43, 0x6F, 0x6D, 0xFF, 0xF0],
         Rfc2217Client.BuildSignature("VCom"));
+
+    AssertRfc2217Notifications(
+        Rfc2217Client.BuildQuerySerialSettings(),
+        new Rfc2217Notification(1, [0x00, 0x00, 0x00, 0x00]),
+        new Rfc2217Notification(2, [0]),
+        new Rfc2217Notification(3, [0]),
+        new Rfc2217Notification(4, [0]));
+
+    AssertRfc2217Notifications(
+        Rfc2217Client.BuildQueryControlState(),
+        new Rfc2217Notification(5, [0]),
+        new Rfc2217Notification(5, [4]),
+        new Rfc2217Notification(5, [7]),
+        new Rfc2217Notification(5, [10]),
+        new Rfc2217Notification(5, [13]));
 }
 
 static void Hub4comRfc2217ClientBaseline()
@@ -443,6 +458,30 @@ static void Rfc2217AckSemantics()
         !new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [17], AllowAcceptedValue: true)
             .MatchesAcceptedSetControlValue(new Rfc2217Notification(Rfc2217Client.AckSetControl, [14])),
         "Outbound flow-control ACK must not match an inbound accepted value.");
+    AssertTrue(
+        new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [0], AllowAcceptedValue: true)
+            .MatchesAcceptedSetControlValue(new Rfc2217Notification(Rfc2217Client.AckSetControl, [3])),
+        "Outbound flow-control query should accept an outbound flow-control response.");
+    AssertTrue(
+        new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [4], AllowAcceptedValue: true)
+            .MatchesAcceptedSetControlValue(new Rfc2217Notification(Rfc2217Client.AckSetControl, [6])),
+        "BREAK query should accept BREAK off response.");
+    AssertTrue(
+        new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [7], AllowAcceptedValue: true)
+            .MatchesAcceptedSetControlValue(new Rfc2217Notification(Rfc2217Client.AckSetControl, [8])),
+        "DTR query should accept DTR on response.");
+    AssertTrue(
+        new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [10], AllowAcceptedValue: true)
+            .MatchesAcceptedSetControlValue(new Rfc2217Notification(Rfc2217Client.AckSetControl, [12])),
+        "RTS query should accept RTS off response.");
+    AssertTrue(
+        new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [13], AllowAcceptedValue: true)
+            .MatchesAcceptedSetControlValue(new Rfc2217Notification(Rfc2217Client.AckSetControl, [16])),
+        "Inbound flow-control query should accept an inbound flow-control response.");
+    AssertTrue(
+        !new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [7], AllowAcceptedValue: true)
+            .MatchesAcceptedSetControlValue(new Rfc2217Notification(Rfc2217Client.AckSetControl, [11])),
+        "DTR query must not match an RTS response.");
     AssertEqual("17", Rfc2217Client.MapOutboundFlowControl(0x20, 0).ToString());
     AssertEqual("18", Rfc2217Client.MapInboundFlowControl(0x02, 0).ToString());
     AssertEqual("16", Rfc2217Client.MapInboundFlowControl(0, 0x80).ToString());

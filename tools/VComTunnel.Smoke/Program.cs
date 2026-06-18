@@ -167,9 +167,45 @@ static async Task ProbeRfc2217EndpointAsync(SmokeOptions options, CancellationTo
         client.BuildInitialNegotiation(),
         Rfc2217Client.BuildInitialExpectedAcks(),
         options.ReadSeconds,
-        cancellationToken);
+        cancellationToken,
+        allowMissingAcks: true);
     Console.WriteLine($"RFC2217 probe {options.Host}:{options.Port}");
     DumpProbeExchange(initial);
+    var degraded = initial.MissingAcks.Count > 0;
+
+    if (options.ProbeQuery)
+    {
+        var serialQuery = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "current serial settings",
+            Rfc2217Client.BuildQuerySerialSettings(),
+            [
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetBaudRate, [0, 0, 0, 0], AllowAcceptedValue: true),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetDataSize, [0], AllowAcceptedValue: true),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetParity, [0], AllowAcceptedValue: true),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetStopSize, [0], AllowAcceptedValue: true)
+            ],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(serialQuery);
+
+        var controlQuery = await ProbeRfc2217ExchangeAsync(
+            stream,
+            client,
+            "current control state",
+            Rfc2217Client.BuildQueryControlState(),
+            [
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [0], AllowAcceptedValue: true),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [4], AllowAcceptedValue: true),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [7], AllowAcceptedValue: true),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [10], AllowAcceptedValue: true),
+                new Rfc2217ExpectedAck(Rfc2217Client.AckSetControl, [13], AllowAcceptedValue: true)
+            ],
+            options.ReadSeconds,
+            cancellationToken);
+        DumpProbeExchange(controlQuery);
+    }
 
     if (options.ProbeSettings)
     {
@@ -252,7 +288,9 @@ static async Task ProbeRfc2217EndpointAsync(SmokeOptions options, CancellationTo
         DumpProbeExchange(purgeExchange);
     }
 
-    Console.WriteLine("RFC2217 probe passed.");
+    Console.WriteLine(degraded
+        ? "RFC2217 probe completed with degraded initial status-mask support."
+        : "RFC2217 probe passed.");
 }
 
 static async Task<Rfc2217ProbeExchange> ProbeRfc2217ExchangeAsync(
@@ -262,7 +300,8 @@ static async Task<Rfc2217ProbeExchange> ProbeRfc2217ExchangeAsync(
     byte[] request,
     IReadOnlyList<Rfc2217ExpectedAck> expectedAcks,
     int seconds,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    bool allowMissingAcks = false)
 {
     var pendingAcks = expectedAcks.ToList();
     var notifications = new List<Rfc2217Notification>();
@@ -330,10 +369,16 @@ static async Task<Rfc2217ProbeExchange> ProbeRfc2217ExchangeAsync(
     if (pendingAcks.Count != 0)
     {
         var missing = string.Join(", ", pendingAcks.Select(ack => ack.Describe()));
-        throw new InvalidOperationException($"RFC2217 probe did not observe {description} ACK(s): {missing}.");
+        if (!allowMissingAcks)
+        {
+            var observed = notifications.Count == 0
+                ? "none"
+                : string.Join(", ", notifications.Select(Rfc2217ExpectedAck.Describe));
+            throw new InvalidOperationException($"RFC2217 probe did not observe {description} ACK(s): {missing}. Observed: {observed}; serial bytes: {serialBytes}; telnet replies: {replyBytes}; received bytes: {receivedBytes}.");
+        }
     }
 
-    return new Rfc2217ProbeExchange(description, request.Length, receivedBytes, replyBytes, serialBytes, notifications);
+    return new Rfc2217ProbeExchange(description, request.Length, receivedBytes, replyBytes, serialBytes, notifications, pendingAcks);
 }
 
 static bool ProbeAckMatches(Rfc2217ExpectedAck expected, Rfc2217Notification notification)
@@ -358,6 +403,14 @@ static void DumpProbeExchange(Rfc2217ProbeExchange exchange)
         foreach (var notification in exchange.Notifications)
         {
             Console.WriteLine($"    {Rfc2217ExpectedAck.Describe(notification)}");
+        }
+    }
+    if (exchange.MissingAcks.Count > 0)
+    {
+        Console.WriteLine("  missing ACKs:");
+        foreach (var ack in exchange.MissingAcks)
+        {
+            Console.WriteLine($"    {ack.Describe()}");
         }
     }
 }
@@ -549,6 +602,7 @@ internal sealed record SmokeOptions(
     bool ExpectEcho,
     bool ControlIoctls,
     bool ProbeOnly,
+    bool ProbeQuery,
     bool ProbeSettings,
     bool ProbeControls,
     bool ProbeFakeServer,
@@ -558,6 +612,7 @@ internal sealed record SmokeOptions(
     public static SmokeOptions Parse(string[] args)
     {
         var probeOnly = args.Any(arg => string.Equals(arg, "--probe-rfc2217", StringComparison.OrdinalIgnoreCase));
+        var probeQuery = args.Any(arg => string.Equals(arg, "--probe-query", StringComparison.OrdinalIgnoreCase));
         var probeSettings = args.Any(arg => string.Equals(arg, "--probe-settings", StringComparison.OrdinalIgnoreCase));
         var probeControls = args.Any(arg => string.Equals(arg, "--probe-controls", StringComparison.OrdinalIgnoreCase));
         var probeFakeServer = args.Any(arg => string.Equals(arg, "--fake-server", StringComparison.OrdinalIgnoreCase));
@@ -574,14 +629,14 @@ internal sealed record SmokeOptions(
         {
             if (values.Length < 2 || !int.TryParse(values[1], out var probePort) || probePort <= 0)
             {
-                throw new ArgumentException("Usage: VComTunnel.Smoke --probe-rfc2217 10.0.2.196 5000 [seconds] [--probe-settings] [--probe-controls] [--fake-server]");
+                throw new ArgumentException("Usage: VComTunnel.Smoke --probe-rfc2217 10.0.2.196 5000 [seconds] [--probe-query] [--probe-settings] [--probe-controls] [--fake-server]");
             }
 
             var seconds = values.Length >= 3 && int.TryParse(values[2], out var parsedSeconds) && parsedSeconds > 0
                 ? parsedSeconds
                 : 5;
-            var exchangeCount = 1 + (probeSettings ? 2 : 0) + (probeControls ? 5 : 0);
-            return new SmokeOptions("", values[0], probePort, true, false, false, true, probeSettings, probeControls, probeFakeServer, (seconds * exchangeCount) + 3, seconds);
+            var exchangeCount = 1 + (probeQuery ? 2 : 0) + (probeSettings ? 2 : 0) + (probeControls ? 5 : 0);
+            return new SmokeOptions("", values[0], probePort, true, false, false, true, probeQuery, probeSettings, probeControls, probeFakeServer, (seconds * exchangeCount) + 3, seconds);
         }
 
         if (remote)
@@ -591,7 +646,7 @@ internal sealed record SmokeOptions(
                 throw new ArgumentException("Usage: VComTunnel.Smoke --remote COM27 10.0.2.196 5000 [--expect-echo] [--control-ioctls]");
             }
 
-            return new SmokeOptions(values[0], values[1], remotePort, true, expectEcho, controlIoctls, false, false, false, false, 10, 2);
+            return new SmokeOptions(values[0], values[1], remotePort, true, expectEcho, controlIoctls, false, false, false, false, false, 10, 2);
         }
 
         var portName = values.FirstOrDefault() ?? "COM27";
@@ -601,7 +656,7 @@ internal sealed record SmokeOptions(
             tcpPort = 44000;
         }
 
-        return new SmokeOptions(portName, "127.0.0.1", tcpPort, false, expectEcho, controlIoctls, false, false, false, false, 10, 3);
+        return new SmokeOptions(portName, "127.0.0.1", tcpPort, false, expectEcho, controlIoctls, false, false, false, false, false, 10, 3);
     }
 }
 
@@ -611,7 +666,8 @@ internal sealed record Rfc2217ProbeExchange(
     int ReceivedBytes,
     int TelnetReplyBytes,
     int SerialBytes,
-    IReadOnlyList<Rfc2217Notification> Notifications);
+    IReadOnlyList<Rfc2217Notification> Notifications,
+    IReadOnlyList<Rfc2217ExpectedAck> MissingAcks);
 
 internal sealed record SerialStats(
     uint ReceivedCount,
@@ -1055,6 +1111,7 @@ internal static class FakeRfc2217EchoServer
 
     private static byte[] BuildServerAck(Rfc2217Notification notification)
     {
+        var payload = BuildServerAckPayload(notification);
         var command = notification.Command switch
         {
             1 => Rfc2217Client.AckSetBaudRate,
@@ -1073,7 +1130,29 @@ internal static class FakeRfc2217EchoServer
             return [];
         }
 
-        return BuildServerFrame(command, notification.Payload);
+        return BuildServerFrame(command, payload);
+    }
+
+    private static byte[] BuildServerAckPayload(Rfc2217Notification notification)
+    {
+        if (notification.Payload.Length == 0)
+        {
+            return notification.Payload;
+        }
+
+        return notification.Command switch
+        {
+            1 when notification.Payload is [0, 0, 0, 0] => [0x00, 0x01, 0xC2, 0x00],
+            2 when notification.Payload is [0] => [8],
+            3 when notification.Payload is [0] => [1],
+            4 when notification.Payload is [0] => [1],
+            5 when notification.Payload is [0] => [1],
+            5 when notification.Payload is [4] => [6],
+            5 when notification.Payload is [7] => [8],
+            5 when notification.Payload is [10] => [11],
+            5 when notification.Payload is [13] => [14],
+            _ => notification.Payload
+        };
     }
 
     private static byte[] BuildServerFrame(byte command, params byte[] payload)
