@@ -26,6 +26,7 @@ typedef struct _DEVICE_CONTEXT {
     BOOLEAN Dtr;
     BOOLEAN Rts;
     BOOLEAN ServiceAttached;
+    BOOLEAN ControlLinkCreated;
     VCOMTUNNEL_CONNECTION_STATE ConnectionState;
     WDFQUEUE DefaultQueue;
     WCHAR PortName[32];
@@ -47,8 +48,17 @@ EVT_WDF_IO_QUEUE_IO_READ VctEvtIoRead;
 EVT_WDF_IO_QUEUE_IO_WRITE VctEvtIoWrite;
 EVT_WDF_DEVICE_FILE_CREATE VctEvtDeviceFileCreate;
 EVT_WDF_FILE_CLOSE VctEvtFileClose;
+EVT_WDF_FILE_CLEANUP VctEvtFileCleanup;
+EVT_WDF_REQUEST_CANCEL VctEvtRequestCancel;
 
 NTSTATUS
 VctQueueInitialize(
     _In_ WDFDEVICE Device
+    );
+
+VOID
+VctCancelPendingRequestsForFile(
+    _In_ WDFDEVICE Device,
+    _In_ WDFFILEOBJECT FileObject,
+    _In_ NTSTATUS Status
     );

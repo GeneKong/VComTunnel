@@ -72,13 +72,20 @@ VctCreateComLink(
     }
 
     RtlInitUnicodeString(&comLink, linkBuffer);
-    status = WdfDeviceCreateSymbolicLink(Device, &comLink);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    RtlInitUnicodeString(&comLink, VCOMTUNNEL_CONTROL_LINK);
     return WdfDeviceCreateSymbolicLink(Device, &comLink);
+}
+
+static VOID
+VctCreateControlLink(
+    _Inout_ PDEVICE_CONTEXT Context
+    )
+{
+    UNICODE_STRING deviceName;
+    UNICODE_STRING controlLink;
+
+    RtlInitUnicodeString(&deviceName, VCOMTUNNEL_NT_DEVICE_NAME);
+    RtlInitUnicodeString(&controlLink, VCOMTUNNEL_CONTROL_LINK);
+    Context->ControlLinkCreated = NT_SUCCESS(IoCreateSymbolicLink(&controlLink, &deviceName));
 }
 
 static VOID
@@ -103,6 +110,22 @@ VctRegisterSerialCommName(
     RtlInitUnicodeString(&portName, Context->PortName);
     WdfRegistryAssignUnicodeString(key, &valueName, &portName);
     WdfRegistryClose(key);
+}
+
+static VOID
+VctEvtDeviceContextCleanup(
+    _In_ WDFOBJECT Object
+    )
+{
+    PDEVICE_CONTEXT context;
+    UNICODE_STRING controlLink;
+
+    context = DeviceGetContext((WDFDEVICE)Object);
+    if (context->ControlLinkCreated) {
+        RtlInitUnicodeString(&controlLink, VCOMTUNNEL_CONTROL_LINK);
+        IoDeleteSymbolicLink(&controlLink);
+        context->ControlLinkCreated = FALSE;
+    }
 }
 
 NTSTATUS
@@ -136,10 +159,11 @@ VctEvtDeviceAdd(
         return status;
     }
 
-    WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, VctEvtDeviceFileCreate, VctEvtFileClose, WDF_NO_EVENT_CALLBACK);
+    WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, VctEvtDeviceFileCreate, VctEvtFileClose, VctEvtFileCleanup);
     WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, WDF_NO_OBJECT_ATTRIBUTES);
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&deviceAttributes, DEVICE_CONTEXT);
+    deviceAttributes.EvtCleanupCallback = VctEvtDeviceContextCleanup;
 
     status = WdfDeviceCreate(&DeviceInit, &deviceAttributes, &device);
     if (!NT_SUCCESS(status)) {
@@ -159,11 +183,9 @@ VctEvtDeviceAdd(
     if (!NT_SUCCESS(status)) {
         return status;
     }
+    VctCreateControlLink(context);
 
-    status = WdfDeviceCreateDeviceInterface(device, &GUID_DEVINTERFACE_COMPORT, NULL);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
+    WdfDeviceCreateDeviceInterface(device, &GUID_DEVINTERFACE_COMPORT, NULL);
 
     VctRegisterSerialCommName(device, context);
 
@@ -194,4 +216,15 @@ VctEvtFileClose(
     )
 {
     UNREFERENCED_PARAMETER(FileObject);
+}
+
+VOID
+VctEvtFileCleanup(
+    _In_ WDFFILEOBJECT FileObject
+    )
+{
+    WDFDEVICE device;
+
+    device = WdfFileObjectGetDevice(FileObject);
+    VctCancelPendingRequestsForFile(device, FileObject, STATUS_CANCELLED);
 }
