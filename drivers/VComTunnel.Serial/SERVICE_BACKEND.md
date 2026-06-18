@@ -88,6 +88,8 @@ Current implementation note:
   their ACKs before the mapping is reported as running.
 - RFC2217 FLOWCONTROL-SUSPEND pauses outbound serial data and control commands
   until FLOWCONTROL-RESUME is received.
+- TCP writes are serialized across driver events, Telnet negotiation replies,
+  and idle keep-alive. Idle RFC2217 sessions send Telnet NOP every 30 seconds.
 - Wait-mask notifications currently cover RXCHAR, CTS, DSR, RLSD, RING, BREAK,
   and ERR events raised by received bytes or RFC2217 modem/line notifications.
 - Remaining hardening: additional serial events beyond the current wait-mask

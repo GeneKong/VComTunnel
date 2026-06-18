@@ -21,6 +21,7 @@ public sealed class Rfc2217Client
     private const byte Wont = 252;
     private const byte Will = 251;
     private const byte Sb = 250;
+    private const byte Nop = 241;
     private const byte Se = 240;
     private const byte TelnetBinary = 0;
     private const byte SuppressGoAhead = 3;
@@ -64,6 +65,11 @@ public sealed class Rfc2217Client
             .. BuildSetLineStateMask(LineStateErrorMask),
             .. BuildSetModemStateMask(ModemStateMask)
         ];
+    }
+
+    public static byte[] BuildTelnetNop()
+    {
+        return [Iac, Nop];
     }
 
     public static Rfc2217ExpectedAck[] BuildInitialExpectedAcks()

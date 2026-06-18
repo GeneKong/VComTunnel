@@ -179,7 +179,8 @@ Current status is still experimental: the WDK project produces a test-signed
 negotiation plus baud-rate, line-control, DTR/RTS, BREAK, flow-control, purge,
 command ACK correlation with accepted-value validation and timeout retry,
 startup line/modem mask ACK validation, remote flow-control suspend/resume
-handling, modem/line notification handling, and basic wait-mask notifications
-for RX, CTS, DSR, RLSD, RING, BREAK, and ERR events. Remaining hardening work is
-broader serial compatibility coverage and live ESP-DAP compatibility validation
-against real tools.
+handling, serialized Telnet/RFC2217 writes with idle NOP keep-alive, modem/line
+notification handling, and basic wait-mask notifications for RX, CTS, DSR,
+RLSD, RING, BREAK, and ERR events. Remaining hardening work is broader serial
+compatibility coverage and live ESP-DAP compatibility validation against real
+tools.

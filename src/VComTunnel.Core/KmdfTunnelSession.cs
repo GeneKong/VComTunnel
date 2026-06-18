@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.ComponentModel;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -27,6 +28,8 @@ public sealed class KmdfTunnelSession : IDisposable
     private const int MaxEventBytes = 4096;
     private const int MaxRxBytes = 4096;
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan KeepAlivePollInterval = TimeSpan.FromSeconds(5);
 
     private static readonly uint IoctlAttach = CtlCode(0x801);
     private static readonly uint IoctlWaitEvent = CtlCode(0x802);
@@ -43,15 +46,18 @@ public sealed class KmdfTunnelSession : IDisposable
     private readonly object _ackLock = new();
     private readonly List<Rfc2217ExpectedAck> _pendingAcks = [];
     private readonly object _flowLock = new();
+    private readonly SemaphoreSlim _networkWriteLock = new(1, 1);
     private readonly CancellationTokenSource _stop = new();
     private TaskCompletionSource? _pendingAckCompletion;
     private TaskCompletionSource? _flowResumeCompletion;
     private bool _remoteFlowSuspended;
+    private long _lastNetworkActivityTicks;
     private SafeFileHandle? _eventDriver;
     private SafeFileHandle? _commandDriver;
     private TcpClient? _tcp;
     private Task? _eventLoop;
     private Task? _networkLoop;
+    private Task? _keepAliveLoop;
     private int _disposed;
 
     public KmdfTunnelSession(TunnelMapping mapping, InMemoryLog log, Action<KmdfTunnelSession, string> faulted)
@@ -60,6 +66,7 @@ public sealed class KmdfTunnelSession : IDisposable
         _log = log;
         _faulted = faulted;
         State = TunnelRunState.Starting;
+        MarkNetworkActivity();
     }
 
     public TunnelRunState State { get; private set; }
@@ -100,6 +107,7 @@ public sealed class KmdfTunnelSession : IDisposable
         _log.Info(_mapping.Name, $"Started KMDF tunnel {_mapping.VisiblePort} -> {_mapping.Host}:{_mapping.Port}.");
 
         _eventLoop = Task.Run(EventLoopAsync);
+        _keepAliveLoop = Task.Run(KeepAliveLoopAsync);
     }
 
     public void Dispose()
@@ -213,11 +221,12 @@ public sealed class KmdfTunnelSession : IDisposable
                 {
                     throw new IOException("Remote endpoint closed the TCP connection.");
                 }
+                MarkNetworkActivity();
 
                 var frame = _rfc2217.ProcessNetworkBytes(buffer, read);
                 if (frame.Replies.Length > 0)
                 {
-                    await stream.WriteAsync(frame.Replies, _stop.Token).ConfigureAwait(false);
+                    await WriteNetworkAsync(stream, frame.Replies).ConfigureAwait(false);
                 }
 
                 foreach (var notification in frame.Notifications)
@@ -238,6 +247,33 @@ public sealed class KmdfTunnelSession : IDisposable
                 _log.Info(_mapping.Name, $"RFC2217 RX serial {frame.SerialData.Length} byte(s).");
                 DeviceIoControlChecked(_commandDriver, IoctlPushRx, push, null);
                 _log.Info(_mapping.Name, $"Driver RX push completed {frame.SerialData.Length} byte(s).");
+            }
+        }
+        catch (Exception ex) when (!_stop.IsCancellationRequested)
+        {
+            Fault(ex);
+        }
+    }
+
+    private async Task KeepAliveLoopAsync()
+    {
+        try
+        {
+            var stream = _tcp!.GetStream();
+            while (!_stop.IsCancellationRequested)
+            {
+                await Task.Delay(KeepAlivePollInterval, _stop.Token).ConfigureAwait(false);
+                if (IsRemoteFlowSuspended())
+                {
+                    continue;
+                }
+
+                var idle = Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastNetworkActivityTicks));
+                if (idle >= KeepAliveInterval)
+                {
+                    await WriteNetworkAsync(stream, Rfc2217Client.BuildTelnetNop()).ConfigureAwait(false);
+                    _log.Info(_mapping.Name, "RFC2217 keep-alive NOP sent.");
+                }
             }
         }
         catch (Exception ex) when (!_stop.IsCancellationRequested)
@@ -306,7 +342,7 @@ public sealed class KmdfTunnelSession : IDisposable
         if (frame.ExpectedAckCommands.Length == 0)
         {
             await WaitForRemoteFlowAsync().ConfigureAwait(false);
-            await stream.WriteAsync(frame.Bytes, _stop.Token).ConfigureAwait(false);
+            await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
             return;
         }
 
@@ -314,7 +350,7 @@ public sealed class KmdfTunnelSession : IDisposable
         {
             var wait = PrepareAckWait(frame.ExpectedAckCommands);
             await WaitForRemoteFlowAsync().ConfigureAwait(false);
-            await stream.WriteAsync(frame.Bytes, _stop.Token).ConfigureAwait(false);
+            await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
 
             try
             {
@@ -329,6 +365,20 @@ public sealed class KmdfTunnelSession : IDisposable
         }
 
         throw new IOException($"RFC2217 {frame.Description} ack timed out after retry.");
+    }
+
+    private async Task WriteNetworkAsync(NetworkStream stream, byte[] bytes)
+    {
+        await _networkWriteLock.WaitAsync(_stop.Token).ConfigureAwait(false);
+        try
+        {
+            await stream.WriteAsync(bytes, _stop.Token).ConfigureAwait(false);
+            MarkNetworkActivity();
+        }
+        finally
+        {
+            _networkWriteLock.Release();
+        }
     }
 
     private Task PrepareAckWait(IReadOnlyList<Rfc2217ExpectedAck> expectedAcks)
@@ -426,6 +476,19 @@ public sealed class KmdfTunnelSession : IDisposable
             _log.Info(_mapping.Name, "RFC2217 peer resumed flow-control.");
             resume?.TrySetResult();
         }
+    }
+
+    private bool IsRemoteFlowSuspended()
+    {
+        lock (_flowLock)
+        {
+            return _remoteFlowSuspended;
+        }
+    }
+
+    private void MarkNetworkActivity()
+    {
+        Interlocked.Exchange(ref _lastNetworkActivityTicks, Stopwatch.GetTimestamp());
     }
 
     private static uint MapRfc2217ModemState(byte value)

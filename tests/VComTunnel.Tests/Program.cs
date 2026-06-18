@@ -226,6 +226,10 @@ static void Rfc2217CommandEncoding()
     AssertBytes(
         [0x56, 0xFF, 0xFF, 0x43],
         Rfc2217Client.EscapeSerialData([0x56, 0xFF, 0x43], 0, 3));
+
+    AssertBytes(
+        [0xFF, 0xF1],
+        Rfc2217Client.BuildTelnetNop());
 }
 
 static void Rfc2217TelnetParser()
