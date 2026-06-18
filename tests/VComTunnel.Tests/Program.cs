@@ -26,6 +26,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com create and remove plans", Com0comCreateAndRemovePlansAsync),
     ("KMDF mapping reports startup fault", KmdfMappingReportsStartupFaultAsync),
     ("KMDF session restarts after network fault", KmdfSessionRestartsAfterNetworkFaultAsync),
+    ("KMDF permanent driver faults do not restart", KmdfPermanentDriverFaultDoesNotRestartAsync),
     ("fake com2tcp process starts and stops", FakeCom2TcpProcessStartsAndStopsAsync),
     ("fake com2tcp process restarts after exit", FakeCom2TcpProcessRestartsAfterExitAsync),
     ("manual stop suppresses fake com2tcp restart", ManualStopSuppressesFakeCom2TcpRestartAsync),
@@ -675,6 +676,48 @@ static async Task KmdfSessionRestartsAfterNetworkFaultAsync()
         "KMDF network fault should schedule a restart.");
 }
 
+static async Task KmdfPermanentDriverFaultDoesNotRestartAsync()
+{
+    using var temp = new TempDir();
+    var mapping = new TunnelMapping
+    {
+        Name = "Old driver",
+        Backend = TunnelBackend.Kmdf,
+        VisiblePort = "COM48",
+        BackingPort = null,
+        RestartOnFailure = true
+    };
+    var store = await StoreWithMappingAsync(temp.Path, mapping);
+    var log = new InMemoryLog();
+    var starts = 0;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        [],
+        (sessionMapping, sessionLog, faulted) =>
+        {
+            Interlocked.Increment(ref starts);
+            return new FakeKmdfTunnelSession(
+                faulted,
+                failAfterStart: null,
+                failOnStart: "KMDF driver protocol 1.1 is older than required 1.2. Rebuild and reinstall VComTunnel.Serial.");
+        },
+        TimeSpan.FromMilliseconds(50));
+
+    var id = (await store.LoadAsync()).Mappings.Single().Id;
+    var first = await orchestrator.StartAsync(id);
+    AssertEqual(TunnelRunState.Faulted.ToString(), first.State.ToString());
+    AssertStringContains(first.LastError ?? "", "driver protocol");
+
+    await Task.Delay(150);
+
+    AssertEqual("1", Volatile.Read(ref starts).ToString());
+    AssertTrue(
+        !log.Snapshot().Any(e => e.Message.Contains("Scheduling KMDF restart", StringComparison.OrdinalIgnoreCase)),
+        "Permanent KMDF driver errors must not schedule restart.");
+}
+
 static async Task Com0comCreateAndRemovePlansAsync()
 {
     using var temp = new TempDir();
@@ -1072,11 +1115,13 @@ internal sealed class FakeKmdfTunnelSession : IKmdfTunnelSession
 {
     private readonly Action<IKmdfTunnelSession, string> _faulted;
     private readonly string? _failAfterStart;
+    private readonly string? _failOnStart;
 
-    public FakeKmdfTunnelSession(Action<IKmdfTunnelSession, string> faulted, string? failAfterStart)
+    public FakeKmdfTunnelSession(Action<IKmdfTunnelSession, string> faulted, string? failAfterStart, string? failOnStart = null)
     {
         _faulted = faulted;
         _failAfterStart = failAfterStart;
+        _failOnStart = failOnStart;
     }
 
     public TunnelRunState State { get; private set; } = TunnelRunState.Starting;
@@ -1084,6 +1129,13 @@ internal sealed class FakeKmdfTunnelSession : IKmdfTunnelSession
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        if (_failOnStart is not null)
+        {
+            LastError = _failOnStart;
+            State = TunnelRunState.Faulted;
+            throw new InvalidOperationException(_failOnStart);
+        }
+
         State = TunnelRunState.Running;
         if (_failAfterStart is not null)
         {

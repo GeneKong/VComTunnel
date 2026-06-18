@@ -343,6 +343,7 @@ public sealed class TunnelOrchestrator
     private static bool IsPermanentKmdfError(string value)
     {
         return value.Contains("control channel", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("driver protocol", StringComparison.OrdinalIgnoreCase)
             || value.Contains("ack returned unexpected value", StringComparison.OrdinalIgnoreCase)
             || value.Contains("only available on Windows", StringComparison.OrdinalIgnoreCase);
     }

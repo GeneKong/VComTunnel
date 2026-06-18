@@ -125,6 +125,10 @@ Current implementation note:
 - Startup connection failures and runtime network drops feed the same
   `RestartOnFailure` policy. Manual Stop invalidates delayed restarts so a
   stopped mapping stays stopped.
+- Permanent KMDF setup faults such as a missing control channel, incompatible
+  driver protocol, unsupported platform, or strict RFC2217 ACK rejection do not
+  schedule retries; they require install, driver, or endpoint configuration
+  changes instead of a reconnect loop.
 - Wait-mask notifications currently cover RXCHAR, RXFLAG, RX80FULL, TXEMPTY,
   CTS, DSR, RLSD, RING, BREAK, and ERR events raised by service TX
   consumption, received bytes, RX queue occupancy, EventChar matches, or
