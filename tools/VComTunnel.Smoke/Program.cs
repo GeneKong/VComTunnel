@@ -534,6 +534,14 @@ static async Task<int> ExerciseControlIoctlsAsync(
         readTimeout,
         cancellationToken);
 
+    serial.SetImmediateReadTimeout();
+    var emptyRead = serial.ReadOnce(1);
+    if (emptyRead.Length != 0)
+    {
+        throw new InvalidOperationException($"Expected immediate empty read after purge, got {Convert.ToHexString(emptyRead)}.");
+    }
+    Console.WriteLine("read timeout: immediate empty read returned 0 byte(s).");
+
     serial.SetXoff();
     await WaitForRfc2217Async(
         probe,
@@ -921,6 +929,24 @@ internal sealed class NativeSerial : IDisposable
         DeviceIoControlChecked(IoctlSerialPurge, BitConverter.GetBytes(purgeMask), null, "IOCTL_SERIAL_PURGE");
     }
 
+    public void SetImmediateReadTimeout()
+    {
+        var input = new byte[20];
+        BitConverter.GetBytes(0xFFFFFFFFu).CopyTo(input, 0);
+        DeviceIoControlChecked(IoctlSerialSetTimeouts, input, null, "IOCTL_SERIAL_SET_TIMEOUTS");
+    }
+
+    public byte[] ReadOnce(int byteCount)
+    {
+        var buffer = new byte[byteCount];
+        if (!ReadFile(_handle, buffer, (uint)buffer.Length, out var read, IntPtr.Zero))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "ReadFile failed.");
+        }
+
+        return buffer.Take((int)read).ToArray();
+    }
+
     public void SendImmediate(byte value)
     {
         DeviceIoControlChecked(IoctlSerialImmediateChar, [value], null, "IOCTL_SERIAL_IMMEDIATE_CHAR");
@@ -963,6 +989,7 @@ internal sealed class NativeSerial : IDisposable
     private const uint IoctlSerialSetBreakOn = (0x1Bu << 16) | (4u << 2);
     private const uint IoctlSerialSetBreakOff = (0x1Bu << 16) | (5u << 2);
     private const uint IoctlSerialImmediateChar = (0x1Bu << 16) | (6u << 2);
+    private const uint IoctlSerialSetTimeouts = (0x1Bu << 16) | (7u << 2);
     private const uint IoctlSerialSetXoff = (0x1Bu << 16) | (14u << 2);
     private const uint IoctlSerialSetXon = (0x1Bu << 16) | (15u << 2);
     private const uint IoctlSerialPurge = (0x1Bu << 16) | (19u << 2);

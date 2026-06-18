@@ -1,5 +1,7 @@
 #include "Driver.h"
 
+#define VCOMTUNNEL_TIMEOUT_MAX_ULONG ((ULONG)-1)
+
 static NTSTATUS
 VctCopyInputBuffer(
     _In_ WDFREQUEST Request,
@@ -17,6 +19,36 @@ VctCopyInputBuffer(
 
     RtlCopyMemory(Target, inputBuffer, Size);
     return STATUS_SUCCESS;
+}
+
+static ULONG
+VctReadTimeoutMilliseconds(
+    _In_ const SERIAL_TIMEOUTS* Timeouts,
+    _In_ size_t ReadLength,
+    _Out_ BOOLEAN* CompleteImmediately
+    )
+{
+    ULONGLONG total;
+
+    *CompleteImmediately = FALSE;
+    if (Timeouts->ReadIntervalTimeout == VCOMTUNNEL_TIMEOUT_MAX_ULONG &&
+        Timeouts->ReadTotalTimeoutMultiplier == 0 &&
+        Timeouts->ReadTotalTimeoutConstant == 0) {
+        *CompleteImmediately = TRUE;
+        return 0;
+    }
+
+    total = (ULONGLONG)Timeouts->ReadTotalTimeoutConstant +
+        ((ULONGLONG)Timeouts->ReadTotalTimeoutMultiplier * (ULONGLONG)ReadLength);
+    if (total == 0 &&
+        Timeouts->ReadIntervalTimeout != 0 &&
+        Timeouts->ReadIntervalTimeout != VCOMTUNNEL_TIMEOUT_MAX_ULONG) {
+        total = Timeouts->ReadIntervalTimeout;
+    }
+
+    return total > VCOMTUNNEL_TIMEOUT_MAX_ULONG
+        ? VCOMTUNNEL_TIMEOUT_MAX_ULONG
+        : (ULONG)total;
 }
 
 static NTSTATUS
@@ -964,6 +996,7 @@ VctPushRx(
     }
 
     if (readRequest != NULL) {
+        WdfTimerStop(Context->ReadTimer, FALSE);
         status = WdfRequestUnmarkCancelable(readRequest);
         if (status == STATUS_CANCELLED) {
             return STATUS_SUCCESS;
@@ -1011,6 +1044,7 @@ VctEvtRequestCancel(
     WDFQUEUE queue;
     WDFDEVICE device;
     PDEVICE_CONTEXT context;
+    BOOLEAN stopReadTimer = FALSE;
 
     queue = WdfRequestGetIoQueue(Request);
     device = WdfIoQueueGetDevice(queue);
@@ -1019,6 +1053,7 @@ VctEvtRequestCancel(
     WdfSpinLockAcquire(context->Lock);
     if (context->PendingRead == Request) {
         context->PendingRead = NULL;
+        stopReadTimer = TRUE;
     }
     if (context->PendingWaitMask == Request) {
         context->PendingWaitMask = NULL;
@@ -1028,6 +1063,9 @@ VctEvtRequestCancel(
     }
     WdfSpinLockRelease(context->Lock);
 
+    if (stopReadTimer) {
+        WdfTimerStop(context->ReadTimer, FALSE);
+    }
     WdfRequestComplete(Request, STATUS_CANCELLED);
 }
 
@@ -1042,6 +1080,7 @@ VctCancelPendingRequestsForFile(
     WDFREQUEST readRequest = NULL;
     WDFREQUEST waitMaskRequest = NULL;
     WDFREQUEST serviceWait = NULL;
+    BOOLEAN stopReadTimer = FALSE;
 
     context = DeviceGetContext(Device);
 
@@ -1050,6 +1089,7 @@ VctCancelPendingRequestsForFile(
         WdfRequestGetFileObject(context->PendingRead) == FileObject) {
         readRequest = context->PendingRead;
         context->PendingRead = NULL;
+        stopReadTimer = TRUE;
     }
     if (context->PendingWaitMask != NULL &&
         WdfRequestGetFileObject(context->PendingWaitMask) == FileObject) {
@@ -1069,6 +1109,9 @@ VctCancelPendingRequestsForFile(
     }
     WdfSpinLockRelease(context->Lock);
 
+    if (stopReadTimer) {
+        WdfTimerStop(context->ReadTimer, FALSE);
+    }
     if (readRequest != NULL) {
         VctCompleteUnmarkedRequest(readRequest, Status);
     }
@@ -1445,6 +1488,7 @@ VctEvtIoDeviceControl(
                 WdfSpinLockRelease(context->Lock);
 
                 if (readRequest != NULL) {
+                    WdfTimerStop(context->ReadTimer, FALSE);
                     VctCompleteUnmarkedRequest(readRequest, STATUS_DEVICE_NOT_READY);
                 }
             }
@@ -1579,6 +1623,8 @@ VctEvtIoRead(
     size_t readBufferLength;
     ULONG copied = 0;
     BOOLEAN pending = FALSE;
+    BOOLEAN completeImmediately = FALSE;
+    ULONG timeoutMs = 0;
 
     device = WdfIoQueueGetDevice(Queue);
     context = DeviceGetContext(device);
@@ -1603,21 +1649,57 @@ VctEvtIoRead(
     } else if (context->PendingRead != NULL) {
         status = STATUS_DEVICE_BUSY;
     } else {
-        context->PendingRead = Request;
-        status = WdfRequestMarkCancelableEx(Request, VctEvtRequestCancel);
-        if (NT_SUCCESS(status)) {
-            pending = TRUE;
+        timeoutMs = VctReadTimeoutMilliseconds(&context->Timeouts, Length, &completeImmediately);
+        if (completeImmediately) {
+            copied = 0;
         } else {
-            context->PendingRead = NULL;
+            context->PendingRead = Request;
+            status = WdfRequestMarkCancelableEx(Request, VctEvtRequestCancel);
+            if (NT_SUCCESS(status)) {
+                pending = TRUE;
+            } else {
+                context->PendingRead = NULL;
+            }
         }
     }
     WdfSpinLockRelease(context->Lock);
 
     if (pending) {
+        if (timeoutMs != 0) {
+            WdfTimerStart(context->ReadTimer, WDF_REL_TIMEOUT_IN_MS(timeoutMs));
+        }
         return;
     }
 
     WdfRequestCompleteWithInformation(Request, status, copied);
+}
+
+VOID
+VctEvtReadTimer(
+    _In_ WDFTIMER Timer
+    )
+{
+    WDFDEVICE device;
+    PDEVICE_CONTEXT context;
+    WDFREQUEST readRequest = NULL;
+    NTSTATUS status;
+
+    device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
+    context = DeviceGetContext(device);
+
+    WdfSpinLockAcquire(context->Lock);
+    if (context->PendingRead != NULL) {
+        readRequest = context->PendingRead;
+        context->PendingRead = NULL;
+    }
+    WdfSpinLockRelease(context->Lock);
+
+    if (readRequest != NULL) {
+        status = WdfRequestUnmarkCancelable(readRequest);
+        if (status != STATUS_CANCELLED) {
+            WdfRequestCompleteWithInformation(readRequest, STATUS_SUCCESS, 0);
+        }
+    }
 }
 
 VOID

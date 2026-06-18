@@ -43,6 +43,7 @@ typedef struct _DEVICE_CONTEXT {
     BOOLEAN LegacyControlLinkCreated;
     VCOMTUNNEL_CONNECTION_STATE ConnectionState;
     WDFQUEUE DefaultQueue;
+    WDFTIMER ReadTimer;
     WDFFILEOBJECT ServiceFileObject;
     WCHAR NtDeviceName[64];
     WCHAR ControlLinkName[64];
@@ -76,6 +77,7 @@ EVT_WDF_DEVICE_FILE_CREATE VctEvtDeviceFileCreate;
 EVT_WDF_FILE_CLOSE VctEvtFileClose;
 EVT_WDF_FILE_CLEANUP VctEvtFileCleanup;
 EVT_WDF_REQUEST_CANCEL VctEvtRequestCancel;
+EVT_WDF_TIMER VctEvtReadTimer;
 
 NTSTATUS
 VctQueueInitialize(

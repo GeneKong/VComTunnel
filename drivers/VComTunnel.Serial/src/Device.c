@@ -184,6 +184,8 @@ VctEvtDeviceAdd(
     NTSTATUS status;
     WDFDEVICE device;
     WDF_OBJECT_ATTRIBUTES deviceAttributes;
+    WDF_OBJECT_ATTRIBUTES timerAttributes;
+    WDF_TIMER_CONFIG readTimerConfig;
     WDF_FILEOBJECT_CONFIG fileConfig;
     LONG deviceIndex;
     WCHAR ntDeviceNameBuffer[64];
@@ -235,6 +237,15 @@ VctEvtDeviceAdd(
     VctReadAssignedPortName(device, context);
 
     status = WdfSpinLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &context->Lock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    WDF_TIMER_CONFIG_INIT(&readTimerConfig, VctEvtReadTimer);
+    readTimerConfig.AutomaticSerialization = FALSE;
+    WDF_OBJECT_ATTRIBUTES_INIT(&timerAttributes);
+    timerAttributes.ParentObject = device;
+    status = WdfTimerCreate(&readTimerConfig, &timerAttributes, &context->ReadTimer);
     if (!NT_SUCCESS(status)) {
         return status;
     }
