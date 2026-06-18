@@ -441,6 +441,7 @@ VctCompleteTxEventFromQueue(
     ULONG copied;
     ULONG eventSize;
     PVCT_EVENT_HEADER header;
+    BOOLEAN signalTxEmpty = FALSE;
 
     eventSize = (ULONG)(sizeof(VCT_EVENT_HEADER) + PayloadLength);
     status = WdfRequestRetrieveOutputBuffer(Request, eventSize, (PVOID*)&eventBuffer, &eventBufferLength);
@@ -450,6 +451,7 @@ VctCompleteTxEventFromQueue(
 
     WdfSpinLockAcquire(Context->Lock);
     copied = VctTxCopyOutLocked(Context, eventBuffer + sizeof(VCT_EVENT_HEADER), PayloadLength);
+    signalTxEmpty = Context->TxCount == 0;
     header = (PVCT_EVENT_HEADER)eventBuffer;
     RtlZeroMemory(header, sizeof(*header));
     header->Size = sizeof(VCT_EVENT_HEADER) + copied;
@@ -458,6 +460,9 @@ VctCompleteTxEventFromQueue(
     WdfSpinLockRelease(Context->Lock);
 
     WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, header->Size);
+    if (signalTxEmpty) {
+        VctSignalWaitMaskEvent(Context, SERIAL_EV_TXEMPTY);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1143,6 +1148,7 @@ VctEvtIoWrite(
     ULONG eventSize;
     ULONG copied;
     PVCT_EVENT_HEADER header;
+    BOOLEAN signalTxEmpty = FALSE;
 
     device = WdfIoQueueGetDevice(Queue);
     context = DeviceGetContext(device);
@@ -1196,8 +1202,13 @@ VctEvtIoWrite(
         RtlCopyMemory(eventBuffer + sizeof(VCT_EVENT_HEADER), inputBuffer, inputLength);
         WdfRequestCompleteWithInformation(serviceWait, STATUS_SUCCESS, eventSize);
         WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, inputLength);
+        signalTxEmpty = TRUE;
     } else {
         WdfRequestComplete(serviceWait, status);
         WdfRequestCompleteWithInformation(Request, STATUS_DEVICE_NOT_READY, 0);
+    }
+
+    if (signalTxEmpty) {
+        VctSignalWaitMaskEvent(context, SERIAL_EV_TXEMPTY);
     }
 }

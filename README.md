@@ -181,6 +181,6 @@ command ACK correlation with accepted-value validation and timeout retry,
 startup line/modem mask ACK validation, remote flow-control suspend/resume
 handling, SIGNATURE request response, serialized Telnet/RFC2217 writes with idle
 NOP keep-alive, modem/line notification handling, and basic wait-mask
-notifications for RX, CTS, DSR, RLSD, RING, BREAK, and ERR events. Remaining
-hardening work is broader serial compatibility coverage and live ESP-DAP
+notifications for RX, TXEMPTY, CTS, DSR, RLSD, RING, BREAK, and ERR events.
+Remaining hardening work is broader serial compatibility coverage and live ESP-DAP
 compatibility validation against real tools.

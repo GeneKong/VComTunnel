@@ -94,8 +94,9 @@ Current implementation note:
 - Startup connection failures and runtime network drops feed the same
   `RestartOnFailure` policy. Manual Stop invalidates delayed restarts so a
   stopped mapping stays stopped.
-- Wait-mask notifications currently cover RXCHAR, CTS, DSR, RLSD, RING, BREAK,
-  and ERR events raised by received bytes or RFC2217 modem/line notifications.
+- Wait-mask notifications currently cover RXCHAR, TXEMPTY, CTS, DSR, RLSD,
+  RING, BREAK, and ERR events raised by service TX consumption, received bytes,
+  or RFC2217 modem/line notifications.
 - Remaining hardening: additional serial events beyond the current wait-mask
   subset and live hardware/tool compatibility validation.
 
