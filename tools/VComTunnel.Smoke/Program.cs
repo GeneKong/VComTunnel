@@ -35,6 +35,12 @@ await Task.Delay(300, cts.Token);
 
 var payload = new byte[] { 0x56, 0x43, 0x54, 0xFF, 0x4F, 0x4B };
 using var serial = NativeSerial.Open(options.PortName);
+var controlTxBytes = 0;
+if (options.ControlIoctls)
+{
+    controlTxBytes = await ExerciseControlIoctlsAsync(serial, options.ExpectEcho, TimeSpan.FromSeconds(options.ReadSeconds), cts.Token);
+}
+
 try
 {
     serial.Write(payload);
@@ -63,6 +69,23 @@ if (!hasTx)
 if (options.ExpectEcho && !payload.SequenceEqual(received))
 {
     throw new InvalidOperationException("RFC2217 smoke echo mismatch.");
+}
+
+if (options.ControlIoctls)
+{
+    var stats = serial.GetStats();
+    var expectedTx = (uint)(payload.Length + controlTxBytes);
+    if (stats.TransmittedCount < expectedTx)
+    {
+        throw new InvalidOperationException($"Expected at least {expectedTx} transmitted byte(s), stats reported {stats.TransmittedCount}.");
+    }
+
+    if (options.ExpectEcho && stats.ReceivedCount < expectedTx)
+    {
+        throw new InvalidOperationException($"Expected at least {expectedTx} received byte(s), stats reported {stats.ReceivedCount}.");
+    }
+
+    Console.WriteLine($"stats: rx={stats.ReceivedCount} tx={stats.TransmittedCount}");
 }
 
 session.Dispose();
@@ -96,6 +119,45 @@ else
 
 static void DumpLogs(InMemoryLog log) => DumpLogEntries(log.Snapshot(20));
 
+static async Task<int> ExerciseControlIoctlsAsync(
+    NativeSerial serial,
+    bool expectEcho,
+    TimeSpan readTimeout,
+    CancellationToken cancellationToken)
+{
+    serial.ClearStats();
+    serial.ValidateCommConfig();
+    serial.SetQueueSize(4096, 4096);
+
+    serial.SetRawModemControl(NativeSerial.McrDtr | NativeSerial.McrRts | NativeSerial.McrLoop);
+    var rawModemControl = serial.GetRawModemControl();
+    var expectedModemControl = NativeSerial.McrDtr | NativeSerial.McrRts | NativeSerial.McrLoop;
+    if ((rawModemControl & expectedModemControl) != expectedModemControl)
+    {
+        throw new InvalidOperationException($"Raw modem control mismatch: 0x{rawModemControl:X8}.");
+    }
+
+    serial.SetXoff();
+    serial.SetXon();
+
+    if (!expectEcho)
+    {
+        Console.WriteLine("control ioctls: passed without immediate echo check.");
+        return 0;
+    }
+
+    const byte immediate = 0x7E;
+    serial.SendImmediate(immediate);
+    var echoed = await serial.ReadUntilAsync(1, readTimeout, cancellationToken);
+    if (echoed.Length != 1 || echoed[0] != immediate)
+    {
+        throw new InvalidOperationException($"Immediate char echo mismatch: {Convert.ToHexString(echoed)}.");
+    }
+
+    Console.WriteLine("control ioctls: passed.");
+    return 1;
+}
+
 static void DumpLogEntries(IReadOnlyList<LogEntry> entries)
 {
     foreach (var entry in entries)
@@ -110,6 +172,7 @@ internal sealed record SmokeOptions(
     int Port,
     bool Remote,
     bool ExpectEcho,
+    bool ControlIoctls,
     int TimeoutSeconds,
     int ReadSeconds)
 {
@@ -117,6 +180,9 @@ internal sealed record SmokeOptions(
     {
         var remote = args.Any(arg => string.Equals(arg, "--remote", StringComparison.OrdinalIgnoreCase));
         var expectEcho = args.Any(arg => string.Equals(arg, "--expect-echo", StringComparison.OrdinalIgnoreCase)) || !remote;
+        var skipControlIoctls = args.Any(arg => string.Equals(arg, "--no-control-ioctls", StringComparison.OrdinalIgnoreCase));
+        var controlIoctls = args.Any(arg => string.Equals(arg, "--control-ioctls", StringComparison.OrdinalIgnoreCase)) ||
+            (!remote && !skipControlIoctls);
         var values = args
             .Where(arg => !arg.StartsWith("--", StringComparison.Ordinal))
             .ToArray();
@@ -125,10 +191,10 @@ internal sealed record SmokeOptions(
         {
             if (values.Length < 3 || !int.TryParse(values[2], out var remotePort) || remotePort <= 0)
             {
-                throw new ArgumentException("Usage: VComTunnel.Smoke --remote COM27 10.0.2.196 5000 [--expect-echo]");
+                throw new ArgumentException("Usage: VComTunnel.Smoke --remote COM27 10.0.2.196 5000 [--expect-echo] [--control-ioctls]");
             }
 
-            return new SmokeOptions(values[0], values[1], remotePort, true, expectEcho, 10, 2);
+            return new SmokeOptions(values[0], values[1], remotePort, true, expectEcho, controlIoctls, 10, 2);
         }
 
         var portName = values.FirstOrDefault() ?? "COM27";
@@ -138,9 +204,17 @@ internal sealed record SmokeOptions(
             tcpPort = 44000;
         }
 
-        return new SmokeOptions(portName, "127.0.0.1", tcpPort, false, expectEcho, 10, 3);
+        return new SmokeOptions(portName, "127.0.0.1", tcpPort, false, expectEcho, controlIoctls, 10, 3);
     }
 }
+
+internal sealed record SerialStats(
+    uint ReceivedCount,
+    uint TransmittedCount,
+    uint FrameErrorCount,
+    uint SerialOverrunErrorCount,
+    uint BufferOverrunErrorCount,
+    uint ParityErrorCount);
 
 internal sealed class NativeSerial : IDisposable
 {
@@ -149,6 +223,9 @@ internal sealed class NativeSerial : IDisposable
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint OpenExisting = 3;
+    public const uint McrDtr = 0x00000001;
+    public const uint McrRts = 0x00000002;
+    public const uint McrLoop = 0x00000010;
 
     private readonly SafeFileHandle _handle;
 
@@ -216,12 +293,82 @@ internal sealed class NativeSerial : IDisposable
     public uint GetInQueue()
     {
         var output = new byte[24];
-        if (!DeviceIoControl(_handle, IoctlSerialGetCommStatus, null, 0, output, output.Length, out _, IntPtr.Zero))
-        {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "IOCTL_SERIAL_GET_COMMSTATUS failed.");
-        }
+        DeviceIoControlChecked(IoctlSerialGetCommStatus, null, output, "IOCTL_SERIAL_GET_COMMSTATUS");
 
         return BitConverter.ToUInt32(output, 8);
+    }
+
+    public void ValidateCommConfig()
+    {
+        var sizeBuffer = new byte[4];
+        DeviceIoControlChecked(IoctlSerialConfigSize, null, sizeBuffer, "IOCTL_SERIAL_CONFIG_SIZE");
+        var size = BitConverter.ToUInt32(sizeBuffer);
+        if (size < 16 || size > 4096)
+        {
+            throw new InvalidOperationException($"Unexpected SERIALCONFIG size {size}.");
+        }
+
+        var config = new byte[size];
+        var returned = DeviceIoControlChecked(IoctlSerialGetCommConfig, null, config, "IOCTL_SERIAL_GET_COMMCONFIG");
+        if (returned != size || BitConverter.ToUInt32(config) != size)
+        {
+            throw new InvalidOperationException($"Invalid SERIALCONFIG response bytes={returned} size={BitConverter.ToUInt32(config)}.");
+        }
+
+        DeviceIoControlChecked(IoctlSerialSetCommConfig, config, null, "IOCTL_SERIAL_SET_COMMCONFIG");
+    }
+
+    public void SetQueueSize(uint inSize, uint outSize)
+    {
+        var input = new byte[8];
+        BitConverter.GetBytes(inSize).CopyTo(input, 0);
+        BitConverter.GetBytes(outSize).CopyTo(input, 4);
+        DeviceIoControlChecked(IoctlSerialSetQueueSize, input, null, "IOCTL_SERIAL_SET_QUEUE_SIZE");
+    }
+
+    public void ClearStats()
+    {
+        DeviceIoControlChecked(IoctlSerialClearStats, null, null, "IOCTL_SERIAL_CLEAR_STATS");
+    }
+
+    public SerialStats GetStats()
+    {
+        var output = new byte[24];
+        DeviceIoControlChecked(IoctlSerialGetStats, null, output, "IOCTL_SERIAL_GET_STATS");
+        return new SerialStats(
+            BitConverter.ToUInt32(output, 0),
+            BitConverter.ToUInt32(output, 4),
+            BitConverter.ToUInt32(output, 8),
+            BitConverter.ToUInt32(output, 12),
+            BitConverter.ToUInt32(output, 16),
+            BitConverter.ToUInt32(output, 20));
+    }
+
+    public uint GetRawModemControl()
+    {
+        var output = new byte[4];
+        DeviceIoControlChecked(IoctlSerialGetModemControl, null, output, "IOCTL_SERIAL_GET_MODEM_CONTROL");
+        return BitConverter.ToUInt32(output);
+    }
+
+    public void SetRawModemControl(uint modemControl)
+    {
+        DeviceIoControlChecked(IoctlSerialSetModemControl, BitConverter.GetBytes(modemControl), null, "IOCTL_SERIAL_SET_MODEM_CONTROL");
+    }
+
+    public void SetXoff()
+    {
+        DeviceIoControlChecked(IoctlSerialSetXoff, null, null, "IOCTL_SERIAL_SET_XOFF");
+    }
+
+    public void SetXon()
+    {
+        DeviceIoControlChecked(IoctlSerialSetXon, null, null, "IOCTL_SERIAL_SET_XON");
+    }
+
+    public void SendImmediate(byte value)
+    {
+        DeviceIoControlChecked(IoctlSerialImmediateChar, [value], null, "IOCTL_SERIAL_IMMEDIATE_CHAR");
     }
 
     public void Dispose()
@@ -255,7 +402,36 @@ internal sealed class NativeSerial : IDisposable
         out uint bytesWritten,
         IntPtr overlapped);
 
+    private const uint IoctlSerialSetQueueSize = (0x1Bu << 16) | (2u << 2);
+    private const uint IoctlSerialImmediateChar = (0x1Bu << 16) | (6u << 2);
+    private const uint IoctlSerialSetXoff = (0x1Bu << 16) | (14u << 2);
+    private const uint IoctlSerialSetXon = (0x1Bu << 16) | (15u << 2);
     private const uint IoctlSerialGetCommStatus = (0x1Bu << 16) | (27u << 2);
+    private const uint IoctlSerialConfigSize = (0x1Bu << 16) | (32u << 2);
+    private const uint IoctlSerialGetCommConfig = (0x1Bu << 16) | (33u << 2);
+    private const uint IoctlSerialSetCommConfig = (0x1Bu << 16) | (34u << 2);
+    private const uint IoctlSerialGetStats = (0x1Bu << 16) | (35u << 2);
+    private const uint IoctlSerialClearStats = (0x1Bu << 16) | (36u << 2);
+    private const uint IoctlSerialGetModemControl = (0x1Bu << 16) | (37u << 2);
+    private const uint IoctlSerialSetModemControl = (0x1Bu << 16) | (38u << 2);
+
+    private int DeviceIoControlChecked(uint controlCode, byte[]? input, byte[]? output, string description)
+    {
+        if (!DeviceIoControl(
+            _handle,
+            controlCode,
+            input,
+            input?.Length ?? 0,
+            output,
+            output?.Length ?? 0,
+            out var bytesReturned,
+            IntPtr.Zero))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"{description} failed.");
+        }
+
+        return bytesReturned;
+    }
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool DeviceIoControl(

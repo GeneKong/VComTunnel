@@ -22,6 +22,17 @@ dotnet run --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
 scripts\smoke-local.ps1
 ```
 
+The KMDF smoke tool can exercise a test-installed `VComTunnel.Serial` port
+against a local fake RFC2217 echo server:
+
+```powershell
+dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -- COM27
+```
+
+Local smoke runs include control IOCTL probes for comm config, queue size,
+stats, raw modem control, XOFF/XON, and immediate-char echo. Remote smoke skips
+those extra probes unless `--control-ioctls` is passed.
+
 ## Run
 
 Open the GUI. It will check `127.0.0.1:44817` and try to start the local service automatically if it is offline:
