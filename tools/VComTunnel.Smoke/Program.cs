@@ -72,6 +72,19 @@ await Task.Delay(300, cts.Token);
 var payload = new byte[] { 0x56, 0x43, 0x54, 0xFF, 0x4F, 0x4B };
 using var serial = NativeSerial.Open(options.PortName);
 var controlTxBytes = 0;
+if (probe is not null && options.ExpectEcho)
+{
+    try
+    {
+        await VerifyRemoteFlowControlGateAsync(serial, probe, log, TimeSpan.FromSeconds(options.ReadSeconds), cts.Token);
+    }
+    catch
+    {
+        DumpLogs(log);
+        throw;
+    }
+}
+
 if (options.ControlIoctls)
 {
     try
@@ -807,6 +820,58 @@ static async Task<int> ExerciseControlIoctlsAsync(
     return 1;
 }
 
+static async Task VerifyRemoteFlowControlGateAsync(
+    NativeSerial serial,
+    FakeRfc2217Probe probe,
+    InMemoryLog log,
+    TimeSpan timeout,
+    CancellationToken cancellationToken)
+{
+    var started = DateTimeOffset.UtcNow;
+    var payload = new byte[] { 0x46, 0x4C, 0x4F, 0x57 };
+
+    serial.Purge(NativeSerial.PurgeRxClear);
+    probe.ClearSerialData();
+    probe.QueueRemoteNotification(Rfc2217Client.FlowControlSuspend);
+    await WaitForLogAsync(
+        log,
+        entry => entry.Timestamp >= started &&
+            entry.Message.Contains("peer requested flow-control suspend", StringComparison.OrdinalIgnoreCase),
+        "RFC2217 peer requested flow-control suspend",
+        timeout,
+        cancellationToken);
+
+    probe.ClearSerialData();
+    serial.Write(payload);
+    await probe.ExpectNoSerialDataAsync(
+        data => data.SequenceEqual(payload),
+        "suspended TX data",
+        TimeSpan.FromMilliseconds(250),
+        cancellationToken);
+
+    probe.QueueRemoteNotification(Rfc2217Client.FlowControlResume);
+    await WaitForLogAsync(
+        log,
+        entry => entry.Timestamp >= started &&
+            entry.Message.Contains("peer resumed flow-control", StringComparison.OrdinalIgnoreCase),
+        "RFC2217 peer resumed flow-control",
+        timeout,
+        cancellationToken);
+    await probe.WaitForSerialDataAsync(
+        data => data.SequenceEqual(payload),
+        "resumed TX data",
+        timeout,
+        cancellationToken);
+
+    var echoed = await serial.ReadUntilAsync(payload.Length, timeout, cancellationToken);
+    if (!payload.SequenceEqual(echoed))
+    {
+        throw new InvalidOperationException($"Remote flow-control echo mismatch: {Convert.ToHexString(echoed)}.");
+    }
+
+    Console.WriteLine("remote flow-control: suspend gated TX until resume.");
+}
+
 static Task WaitForRfc2217Async(
     FakeRfc2217Probe? probe,
     Func<Rfc2217Notification, bool> predicate,
@@ -1441,6 +1506,7 @@ internal sealed class FakeRfc2217Probe
 {
     private readonly object _gate = new();
     private readonly List<Rfc2217Notification> _notifications = [];
+    private readonly List<byte[]> _serialData = [];
     private readonly Queue<Rfc2217Notification> _remoteNotifications = [];
     private readonly SemaphoreSlim _remoteNotificationSignal = new(0);
 
@@ -1449,6 +1515,71 @@ internal sealed class FakeRfc2217Probe
         lock (_gate)
         {
             _notifications.Add(new Rfc2217Notification(notification.Command, notification.Payload.ToArray()));
+        }
+    }
+
+    public void RecordSerialData(byte[] data)
+    {
+        lock (_gate)
+        {
+            _serialData.Add(data.ToArray());
+        }
+    }
+
+    public void ClearSerialData()
+    {
+        lock (_gate)
+        {
+            _serialData.Clear();
+        }
+    }
+
+    public async Task WaitForSerialDataAsync(
+        Func<byte[], bool> predicate,
+        string description,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            lock (_gate)
+            {
+                if (_serialData.Any(predicate))
+                {
+                    return;
+                }
+            }
+
+            await Task.Delay(20, cancellationToken);
+        }
+
+        var seen = SerialDataSnapshot();
+        var details = seen.Length == 0
+            ? "none"
+            : string.Join(", ", seen.Select(Convert.ToHexString));
+        throw new InvalidOperationException($"Timed out waiting for RFC2217 serial data {description}. Seen: {details}.");
+    }
+
+    public async Task ExpectNoSerialDataAsync(
+        Func<byte[], bool> predicate,
+        string description,
+        TimeSpan quietPeriod,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + quietPeriod;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            lock (_gate)
+            {
+                var match = _serialData.FirstOrDefault(predicate);
+                if (match is not null)
+                {
+                    throw new InvalidOperationException($"Unexpected RFC2217 serial data {description}: {Convert.ToHexString(match)}.");
+                }
+            }
+
+            await Task.Delay(20, cancellationToken);
         }
     }
 
@@ -1505,6 +1636,14 @@ internal sealed class FakeRfc2217Probe
             return _notifications
                 .Select(notification => new Rfc2217Notification(notification.Command, notification.Payload.ToArray()))
                 .ToArray();
+        }
+    }
+
+    private byte[][] SerialDataSnapshot()
+    {
+        lock (_gate)
+        {
+            return _serialData.Select(data => data.ToArray()).ToArray();
         }
     }
 }
@@ -1567,6 +1706,7 @@ internal static class FakeRfc2217EchoServer
 
                     if (frame.SerialData.Length > 0)
                     {
+                        probe?.RecordSerialData(frame.SerialData);
                         var echo = Rfc2217Client.EscapeSerialData(frame.SerialData, 0, frame.SerialData.Length);
                         await WriteServerBytesAsync(stream, writeLock, echo, cancellationToken);
                     }
