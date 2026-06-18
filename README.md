@@ -175,5 +175,8 @@ serial tool -> COMx -> VComTunnel.Serial.sys -> VComTunnel.Service -> RFC2217
 ```
 
 Current status is still experimental: the WDK project produces a test-signed
-`.sys` and `.cat`, but the user-mode path is raw TCP and RFC2217 negotiation is
-not implemented yet.
+`.sys` and `.cat`, and the user-mode path now performs RFC2217/Telnet
+negotiation plus baud-rate, line-control, DTR/RTS, BREAK, flow-control, purge,
+and modem/line notification handling. Remaining hardening work is ACK/retry
+policy, broader serial wait-mask behavior, and live ESP-DAP compatibility
+validation against real tools.

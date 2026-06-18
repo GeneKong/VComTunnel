@@ -16,6 +16,14 @@ public sealed class KmdfTunnelSession : IDisposable
     private const uint FileAttributeNormal = 0x00000080;
     private const int EventHeaderSize = 24;
     private const ushort EventTypeTxData = 1;
+    private const ushort EventTypeSetBaudRate = 2;
+    private const ushort EventTypeSetLineControl = 3;
+    private const ushort EventTypeSetModemControl = 4;
+    private const ushort EventTypeSetHandflow = 5;
+    private const ushort EventTypeSetBreak = 6;
+    private const ushort EventTypePurge = 7;
+    private const uint ModemControlDtr = 0x00000001;
+    private const uint ModemControlRts = 0x00000002;
     private const int MaxEventBytes = 4096;
     private const int MaxRxBytes = 4096;
 
@@ -24,11 +32,13 @@ public sealed class KmdfTunnelSession : IDisposable
     private static readonly uint IoctlPushRx = CtlCode(0x804);
     private static readonly uint IoctlSetConnectionState = CtlCode(0x805);
     private static readonly uint IoctlDetach = CtlCode(0x806);
+    private static readonly uint IoctlSetModemState = CtlCode(0x807);
+    private static readonly uint IoctlSetLineState = CtlCode(0x808);
 
     private readonly TunnelMapping _mapping;
     private readonly InMemoryLog _log;
     private readonly Action<KmdfTunnelSession, string> _faulted;
-    private readonly MinimalRfc2217Filter _rfc2217 = new();
+    private readonly Rfc2217Client _rfc2217 = new();
     private readonly CancellationTokenSource _stop = new();
     private SafeFileHandle? _eventDriver;
     private SafeFileHandle? _commandDriver;
@@ -68,6 +78,8 @@ public sealed class KmdfTunnelSession : IDisposable
         {
             throw new IOException($"Could not connect to RFC2217 endpoint {_mapping.Host}:{_mapping.Port}: {ex.Message}", ex);
         }
+
+        await _tcp.GetStream().WriteAsync(_rfc2217.BuildInitialNegotiation(), cancellationToken).ConfigureAwait(false);
 
         SetConnectionState(2);
         State = TunnelRunState.Running;
@@ -155,15 +167,17 @@ public sealed class KmdfTunnelSession : IDisposable
 
                 var size = ReadUInt32(output, 0);
                 var type = ReadUInt16(output, 8);
-                if (type != EventTypeTxData || size < EventHeaderSize || size > bytes)
+                if (size < EventHeaderSize || size > bytes)
                 {
-                    throw new InvalidOperationException($"KMDF driver returned unsupported event type {type}.");
+                    throw new InvalidOperationException($"KMDF driver returned an invalid event frame type={type}, size={size}, bytes={bytes}.");
                 }
 
                 var payloadBytes = checked((int)size - EventHeaderSize);
-                var escaped = MinimalRfc2217Filter.EscapeSerialData(output, EventHeaderSize, payloadBytes);
-                _log.Info(_mapping.Name, $"KMDF TX event {payloadBytes} byte(s).");
-                await stream.WriteAsync(escaped, _stop.Token).ConfigureAwait(false);
+                var frame = BuildNetworkFrame(type, output, EventHeaderSize, payloadBytes);
+                if (frame.Length > 0)
+                {
+                    await stream.WriteAsync(frame, _stop.Token).ConfigureAwait(false);
+                }
             }
         }
         catch (Exception ex) when (!_stop.IsCancellationRequested)
@@ -191,6 +205,12 @@ public sealed class KmdfTunnelSession : IDisposable
                 if (frame.Replies.Length > 0)
                 {
                     await stream.WriteAsync(frame.Replies, _stop.Token).ConfigureAwait(false);
+                }
+
+                foreach (var notification in frame.Notifications)
+                {
+                    ApplyNotification(notification);
+                    _log.Info(_mapping.Name, $"RFC2217 notification command {notification.Command} ({notification.Payload.Length} byte(s)).");
                 }
 
                 if (frame.SerialData.Length == 0)
@@ -235,6 +255,119 @@ public sealed class KmdfTunnelSession : IDisposable
         DeviceIoControl(_commandDriver, IoctlSetConnectionState, input, input.Length, null, 0, out _, IntPtr.Zero);
     }
 
+    private void ApplyNotification(Rfc2217Notification notification)
+    {
+        if (notification.Payload.Length == 0)
+        {
+            return;
+        }
+
+        if (notification.Command == Rfc2217Client.NotifyModemState)
+        {
+            var input = new byte[4];
+            WriteUInt32(input, 0, MapRfc2217ModemState(notification.Payload[0]));
+            DeviceIoControlChecked(_commandDriver, IoctlSetModemState, input, null);
+        }
+        else if (notification.Command == Rfc2217Client.NotifyLineState)
+        {
+            var input = new byte[4];
+            WriteUInt32(input, 0, MapRfc2217LineErrors(notification.Payload[0]));
+            DeviceIoControlChecked(_commandDriver, IoctlSetLineState, input, null);
+        }
+    }
+
+    private static uint MapRfc2217ModemState(byte value)
+    {
+        const uint serialCtsState = 0x00000010;
+        const uint serialDsrState = 0x00000020;
+        const uint serialRiState = 0x00000040;
+        const uint serialDcdState = 0x00000080;
+
+        uint result = 0;
+        if ((value & 0x10) != 0) result |= serialCtsState;
+        if ((value & 0x20) != 0) result |= serialDsrState;
+        if ((value & 0x40) != 0) result |= serialRiState;
+        if ((value & 0x80) != 0) result |= serialDcdState;
+        return result;
+    }
+
+    private static uint MapRfc2217LineErrors(byte value)
+    {
+        const uint serialErrorBreak = 0x00000001;
+        const uint serialErrorFraming = 0x00000002;
+        const uint serialErrorOverrun = 0x00000004;
+        const uint serialErrorParity = 0x00000010;
+
+        uint result = 0;
+        if ((value & 0x02) != 0) result |= serialErrorOverrun;
+        if ((value & 0x04) != 0) result |= serialErrorParity;
+        if ((value & 0x08) != 0) result |= serialErrorFraming;
+        if ((value & 0x10) != 0) result |= serialErrorBreak;
+        return result;
+    }
+
+    private byte[] BuildNetworkFrame(ushort type, byte[] buffer, int offset, int length)
+    {
+        switch (type)
+        {
+            case EventTypeTxData:
+                _log.Info(_mapping.Name, $"KMDF TX event {length} byte(s).");
+                return Rfc2217Client.EscapeSerialData(buffer, offset, length);
+
+            case EventTypeSetBaudRate:
+                EnsurePayload(type, length, 4);
+                var baudRate = ReadUInt32(buffer, offset);
+                _log.Info(_mapping.Name, $"RFC2217 set baud {baudRate}.");
+                return Rfc2217Client.BuildSetBaudRate(baudRate);
+
+            case EventTypeSetLineControl:
+                EnsurePayload(type, length, 4);
+                var stopBits = buffer[offset];
+                var parity = buffer[offset + 1];
+                var wordLength = buffer[offset + 2];
+                _log.Info(_mapping.Name, $"RFC2217 set line data={wordLength}, parity={parity}, stop={stopBits}.");
+                return Rfc2217Client.BuildSetLineControl(stopBits, parity, wordLength);
+
+            case EventTypeSetModemControl:
+                EnsurePayload(type, length, 8);
+                var mask = ReadUInt32(buffer, offset);
+                bool? dtr = (mask & ModemControlDtr) != 0 ? buffer[offset + 4] != 0 : null;
+                bool? rts = (mask & ModemControlRts) != 0 ? buffer[offset + 5] != 0 : null;
+                _log.Info(_mapping.Name, $"RFC2217 set modem dtr={dtr?.ToString() ?? "-"}, rts={rts?.ToString() ?? "-"}.");
+                return Rfc2217Client.BuildSetModemControl(dtr, rts);
+
+            case EventTypeSetHandflow:
+                EnsurePayload(type, length, 8);
+                var controlHandshake = ReadUInt32(buffer, offset);
+                var flowReplace = ReadUInt32(buffer, offset + 4);
+                _log.Info(_mapping.Name, $"RFC2217 set handflow control=0x{controlHandshake:X8}, flow=0x{flowReplace:X8}.");
+                return Rfc2217Client.BuildSetHandflow(controlHandshake, flowReplace);
+
+            case EventTypeSetBreak:
+                EnsurePayload(type, length, 4);
+                var breakEnabled = buffer[offset] != 0;
+                _log.Info(_mapping.Name, $"RFC2217 set break {breakEnabled}.");
+                return Rfc2217Client.BuildSetBreak(breakEnabled);
+
+            case EventTypePurge:
+                EnsurePayload(type, length, 4);
+                var purgeMask = ReadUInt32(buffer, offset);
+                _log.Info(_mapping.Name, $"RFC2217 purge 0x{purgeMask:X8}.");
+                return Rfc2217Client.BuildPurge(purgeMask);
+
+            default:
+                throw new InvalidOperationException($"KMDF driver returned unsupported event type {type}.");
+        }
+    }
+
+    private static void EnsurePayload(ushort type, int actualLength, int minimumLength)
+    {
+        if (actualLength < minimumLength)
+        {
+            throw new InvalidOperationException($"KMDF event {type} payload was truncated: {actualLength}/{minimumLength} byte(s).");
+        }
+    }
+
     private static int DeviceIoControlChecked(SafeFileHandle? driver, uint ioctl, byte[]? input, byte[]? output)
     {
         if (driver is null)
@@ -272,131 +405,6 @@ public sealed class KmdfTunnelSession : IDisposable
     private static uint ReadUInt32(byte[] buffer, int offset) => BitConverter.ToUInt32(buffer, offset);
     private static void WriteUInt16(byte[] buffer, int offset, ushort value) => BitConverter.GetBytes(value).CopyTo(buffer, offset);
     private static void WriteUInt32(byte[] buffer, int offset, uint value) => BitConverter.GetBytes(value).CopyTo(buffer, offset);
-
-    private sealed class MinimalRfc2217Filter
-    {
-        private const byte Iac = 255;
-        private const byte Dont = 254;
-        private const byte Do = 253;
-        private const byte Wont = 252;
-        private const byte Will = 251;
-        private const byte Sb = 250;
-        private const byte Se = 240;
-        private const byte TelnetBinary = 0;
-        private const byte SuppressGoAhead = 3;
-        private const byte ComPortOption = 44;
-
-        private ParserState _state;
-        private byte _command;
-
-        public Rfc2217Frame ProcessNetworkBytes(byte[] buffer, int length)
-        {
-            var serial = new List<byte>(length);
-            var replies = new List<byte>();
-
-            for (var i = 0; i < length; i++)
-            {
-                var value = buffer[i];
-                switch (_state)
-                {
-                    case ParserState.Data:
-                        if (value == Iac)
-                        {
-                            _state = ParserState.Iac;
-                        }
-                        else
-                        {
-                            serial.Add(value);
-                        }
-                        break;
-
-                    case ParserState.Iac:
-                        if (value == Iac)
-                        {
-                            serial.Add(Iac);
-                            _state = ParserState.Data;
-                        }
-                        else if (value is Do or Dont or Will or Wont)
-                        {
-                            _command = value;
-                            _state = ParserState.Option;
-                        }
-                        else if (value == Sb)
-                        {
-                            _state = ParserState.Subnegotiation;
-                        }
-                        else
-                        {
-                            _state = ParserState.Data;
-                        }
-                        break;
-
-                    case ParserState.Option:
-                        AddNegotiationReply(replies, _command, value);
-                        _state = ParserState.Data;
-                        break;
-
-                    case ParserState.Subnegotiation:
-                        if (value == Iac)
-                        {
-                            _state = ParserState.SubnegotiationIac;
-                        }
-                        break;
-
-                    case ParserState.SubnegotiationIac:
-                        _state = value == Se ? ParserState.Data : ParserState.Subnegotiation;
-                        break;
-                }
-            }
-
-            return new Rfc2217Frame(serial.ToArray(), replies.ToArray());
-        }
-
-        public static byte[] EscapeSerialData(byte[] buffer, int offset, int length)
-        {
-            var escaped = new List<byte>(length);
-            for (var i = 0; i < length; i++)
-            {
-                var value = buffer[offset + i];
-                escaped.Add(value);
-                if (value == Iac)
-                {
-                    escaped.Add(Iac);
-                }
-            }
-
-            return escaped.ToArray();
-        }
-
-        private static void AddNegotiationReply(List<byte> replies, byte command, byte option)
-        {
-            var accept = option is TelnetBinary or SuppressGoAhead or ComPortOption;
-            var reply = command switch
-            {
-                Do => accept ? Will : Wont,
-                Will => accept ? Do : Dont,
-                _ => (byte)0
-            };
-
-            if (reply != 0)
-            {
-                replies.Add(Iac);
-                replies.Add(reply);
-                replies.Add(option);
-            }
-        }
-
-        private enum ParserState
-        {
-            Data,
-            Iac,
-            Option,
-            Subnegotiation,
-            SubnegotiationIac
-        }
-    }
-
-    private sealed record Rfc2217Frame(byte[] SerialData, byte[] Replies);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern SafeFileHandle CreateFileW(

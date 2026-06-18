@@ -46,6 +46,12 @@ Use a vendor device type and private function codes.
 
 #define IOCTL_VCOMTUNNEL_DETACH \
     CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x806, METHOD_BUFFERED, FILE_WRITE_DATA)
+
+#define IOCTL_VCOMTUNNEL_SET_MODEM_STATE \
+    CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x807, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
+
+#define IOCTL_VCOMTUNNEL_SET_LINE_STATE \
+    CTL_CODE(FILE_DEVICE_VCOMTUNNEL, 0x808, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
 ```
 
 The M2 prototype uses `METHOD_BUFFERED` for all private IOCTLs. That keeps the
@@ -101,18 +107,13 @@ struct VCT_EVENT_HEADER {
 Event types:
 
 ```text
-Open
-Close
-Cleanup
 TxData
 SetBaudRate
 SetLineControl
 SetModemControl
 SetHandflow
-SetTimeouts
+SetBreak
 Purge
-SetWaitMask
-CancelWaitMask
 ```
 
 `RequestId` is nonzero when the service must complete a client-facing driver
@@ -184,6 +185,25 @@ Stopping
 
 The driver uses this state for `GET_COMMSTATUS`, write failure behavior, and
 diagnostics. It must not reconnect by itself.
+
+## Remote Modem And Line State
+
+RFC2217 notifications flow from service back to driver:
+
+```c
+struct VCT_MODEM_STATE {
+    UINT32 ModemStatus;
+};
+
+struct VCT_LINE_STATE {
+    UINT32 Errors;
+};
+```
+
+The service maps RFC2217 `NOTIFY-MODEMSTATE` current-state bits to Windows
+`SERIAL_CTS_STATE`, `SERIAL_DSR_STATE`, `SERIAL_RI_STATE`, and
+`SERIAL_DCD_STATE`. It maps RFC2217 `NOTIFY-LINESTATE` error bits to Windows
+serial error bits surfaced through `IOCTL_SERIAL_GET_COMMSTATUS`.
 
 ## Ordering Rules
 

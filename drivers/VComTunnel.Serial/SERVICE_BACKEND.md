@@ -73,10 +73,15 @@ of the app so driver protocol churn does not leak into GUI/API models.
 Current implementation note:
 
 - `KmdfTunnelSession` is the first service-side implementation.
-- It opens `\\.\COMx`, sends `ATTACH`, waits for driver `TxData` events, writes
-  them to a TCP stream, reads TCP bytes, and sends `PUSH_RX` back to the driver.
-- RFC2217 negotiation is not implemented in this class yet; it is a raw TCP
-  data path for validating the KMDF driver channel.
+- It opens the private control channel, sends `ATTACH`, waits for driver events,
+  writes serial bytes and RFC2217 control frames to the TCP stream, reads TCP
+  bytes, and sends `PUSH_RX` or modem/line-state updates back to the driver.
+- RFC2217/Telnet support covers the hub4com client-mode baseline: binary and
+  COM-PORT-OPTION negotiation, IAC escaping, baud-rate, data-size, parity,
+  stop-size, DTR/RTS, BREAK, flow-control, purge, NOTIFY-LINESTATE, and
+  NOTIFY-MODEMSTATE.
+- Remaining hardening: command ACK correlation, retry/timeout policy for
+  rejected RFC2217 controls, and broader wait-mask notification behavior.
 
 ## Start Flow
 
@@ -136,19 +141,19 @@ TxData
 
 SetBaudRate / SetLineControl / SetModemControl / SetHandflow
   -> translate to RFC2217 negotiation/control
-  -> COMPLETE_EVENT after local enqueue or remote acknowledgement policy
+  -> complete the serial IOCTL after the driver has queued the event; service
+     currently logs RFC2217 acknowledgements but does not block on them
 
 Purge
-  -> clear service-side queues
-  -> ask driver to clear RX/TX side as needed
+  -> translate RX/TX clear requests to RFC2217 PURGE-DATA
 
 SetWaitMask / CancelWaitMask
-  -> preserve state for later modem/line event support
+  -> preserve state for broader wait-mask behavior
 ```
 
-The first prototype should prefer deterministic completion over perfect serial
-semantics. For example, completing a baud-rate request after service-side RFC2217
-enqueue is acceptable until real hardware validation requires stricter ACK
+The first prototype prefers deterministic completion over perfect serial
+semantics. Completing a baud-rate request after the event is queued is
+acceptable until real hardware validation requires stricter RFC2217 ACK
 behavior.
 
 ## State Model

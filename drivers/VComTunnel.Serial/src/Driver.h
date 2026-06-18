@@ -13,6 +13,15 @@
 #define VCOMTUNNEL_DEFAULT_PORT_NAME L"COM40"
 #define VCOMTUNNEL_RX_QUEUE_SIZE 4096
 #define VCOMTUNNEL_TX_QUEUE_SIZE 4096
+#define VCOMTUNNEL_EVENT_QUEUE_SIZE 64
+#define VCOMTUNNEL_EVENT_PAYLOAD_SIZE 32
+
+typedef struct _VCOMTUNNEL_QUEUED_EVENT {
+    USHORT Type;
+    USHORT Flags;
+    ULONG PayloadSize;
+    UCHAR Payload[VCOMTUNNEL_EVENT_PAYLOAD_SIZE];
+} VCOMTUNNEL_QUEUED_EVENT, *PVCOMTUNNEL_QUEUED_EVENT;
 
 typedef struct _DEVICE_CONTEXT {
     WDFSPINLOCK Lock;
@@ -23,6 +32,7 @@ typedef struct _DEVICE_CONTEXT {
     SERIAL_HANDFLOW Handflow;
     ULONG WaitMask;
     ULONG ModemStatus;
+    ULONG LineErrors;
     BOOLEAN Dtr;
     BOOLEAN Rts;
     BOOLEAN ServiceAttached;
@@ -37,6 +47,10 @@ typedef struct _DEVICE_CONTEXT {
     WDFREQUEST PendingRead;
     WDFREQUEST PendingServiceWait;
     ULONGLONG NextSequence;
+    VCOMTUNNEL_QUEUED_EVENT EventQueue[VCOMTUNNEL_EVENT_QUEUE_SIZE];
+    ULONG EventHead;
+    ULONG EventTail;
+    ULONG EventCount;
     UCHAR RxBuffer[VCOMTUNNEL_RX_QUEUE_SIZE];
     ULONG RxHead;
     ULONG RxTail;

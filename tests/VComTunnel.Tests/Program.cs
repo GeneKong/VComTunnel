@@ -14,6 +14,8 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com create hints", () => Task.Run(Com0comCreateHints)),
     ("KMDF control path uses visible COM", () => Task.Run(KmdfControlPathUsesVisibleCom)),
     ("KMDF pnputil CSV parser finds VComTunnel ports", () => Task.Run(KmdfPnpUtilCsvParserFindsPorts)),
+    ("RFC2217 command encoding", () => Task.Run(Rfc2217CommandEncoding)),
+    ("RFC2217 telnet parser", () => Task.Run(Rfc2217TelnetParser)),
     ("com2tcp command uses batch wrapper", () => Task.Run(Com2TcpCommandUsesBatchWrapper)),
     ("missing dependencies fault mapping", MissingDependenciesFaultMappingAsync),
     ("missing backing port faults before hub4com", MissingBackingPortFaultsBeforeHub4comAsync),
@@ -169,6 +171,53 @@ InstanceId,DeviceDescription,ClassName,ClassGuid,ManufacturerName,Status,Problem
     AssertTrue(devices[0].IsStarted, "COM27 should be marked as started.");
     AssertEqual("COM31", devices[1].PortName);
     AssertEqual("22", devices[1].ProblemCode ?? "");
+}
+
+static void Rfc2217CommandEncoding()
+{
+    AssertBytes(
+        [0xFF, 0xFA, 0x2C, 0x01, 0x00, 0x01, 0xC2, 0x00, 0xFF, 0xF0],
+        Rfc2217Client.BuildSetBaudRate(115200));
+
+    AssertBytes(
+        [
+            0xFF, 0xFA, 0x2C, 0x02, 0x08, 0xFF, 0xF0,
+            0xFF, 0xFA, 0x2C, 0x03, 0x01, 0xFF, 0xF0,
+            0xFF, 0xFA, 0x2C, 0x04, 0x01, 0xFF, 0xF0
+        ],
+        Rfc2217Client.BuildSetLineControl(stopBits: 0, parity: 0, wordLength: 8));
+
+    AssertBytes(
+        [
+            0xFF, 0xFA, 0x2C, 0x05, 0x08, 0xFF, 0xF0,
+            0xFF, 0xFA, 0x2C, 0x05, 0x0C, 0xFF, 0xF0
+        ],
+        Rfc2217Client.BuildSetModemControl(dtr: true, rts: false));
+
+    AssertBytes(
+        [
+            0xFF, 0xFA, 0x2C, 0x05, 0x11, 0xFF, 0xF0,
+            0xFF, 0xFA, 0x2C, 0x05, 0x12, 0xFF, 0xF0
+        ],
+        Rfc2217Client.BuildSetHandflow(controlHandshake: 0x22, flowReplace: 0));
+
+    AssertBytes(
+        [0x56, 0xFF, 0xFF, 0x43],
+        Rfc2217Client.EscapeSerialData([0x56, 0xFF, 0x43], 0, 3));
+}
+
+static void Rfc2217TelnetParser()
+{
+    var client = new Rfc2217Client();
+    var frame = client.ProcessNetworkBytes([0xFF, 0xFB, 0x2C, 0x41, 0xFF, 0xFF, 0x42], 7);
+
+    AssertBytes([0x41, 0xFF, 0x42], frame.SerialData);
+    AssertBytes([0xFF, 0xFD, 0x2C], frame.Replies);
+
+    var notify = client.ProcessNetworkBytes([0xFF, 0xFA, 0x2C, 0x6B, 0xB0, 0xFF, 0xF0], 7);
+    AssertEqual("0", notify.SerialData.Length.ToString());
+    AssertEqual(Rfc2217Client.NotifyModemState.ToString(), notify.Notifications.Single().Command.ToString());
+    AssertBytes([0xB0], notify.Notifications.Single().Payload);
 }
 
 static void Com2TcpCommandUsesBatchWrapper()
@@ -436,6 +485,14 @@ static void AssertEqual(string expected, string actual)
     if (!string.Equals(expected, actual, StringComparison.Ordinal))
     {
         throw new Exception($"Expected '{expected}', got '{actual}'.");
+    }
+}
+
+static void AssertBytes(byte[] expected, byte[] actual)
+{
+    if (!expected.SequenceEqual(actual))
+    {
+        throw new Exception($"Expected {Convert.ToHexString(expected)}, got {Convert.ToHexString(actual)}.");
     }
 }
 

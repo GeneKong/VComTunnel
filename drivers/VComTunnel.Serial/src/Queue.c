@@ -110,6 +110,7 @@ VctCompleteCommStatus(
     SERIAL_STATUS status;
 
     RtlZeroMemory(&status, sizeof(status));
+    status.Errors = Context->LineErrors;
     status.HoldReasons = 0;
     status.AmountInInQueue = Context->RxCount;
     status.AmountInOutQueue = Context->TxCount;
@@ -209,6 +210,178 @@ VctTxCopyInLocked(
     return copied;
 }
 
+static VOID
+VctEnqueueControlEventLocked(
+    _Inout_ PDEVICE_CONTEXT Context,
+    _In_ USHORT Type,
+    _In_reads_bytes_opt_(PayloadSize) const VOID* Payload,
+    _In_ ULONG PayloadSize
+    )
+{
+    PVCOMTUNNEL_QUEUED_EVENT event;
+
+    if (PayloadSize > VCOMTUNNEL_EVENT_PAYLOAD_SIZE) {
+        return;
+    }
+
+    if (Context->EventCount == VCOMTUNNEL_EVENT_QUEUE_SIZE) {
+        Context->EventTail = (Context->EventTail + 1) % VCOMTUNNEL_EVENT_QUEUE_SIZE;
+        Context->EventCount--;
+    }
+
+    event = &Context->EventQueue[Context->EventHead];
+    RtlZeroMemory(event, sizeof(*event));
+    event->Type = Type;
+    event->PayloadSize = PayloadSize;
+    if (Payload != NULL && PayloadSize > 0) {
+        RtlCopyMemory(event->Payload, Payload, PayloadSize);
+    }
+
+    Context->EventHead = (Context->EventHead + 1) % VCOMTUNNEL_EVENT_QUEUE_SIZE;
+    Context->EventCount++;
+}
+
+static NTSTATUS
+VctCompleteControlEventFromQueue(
+    _In_ WDFREQUEST Request,
+    _Inout_ PDEVICE_CONTEXT Context,
+    _In_ BOOLEAN UnmarkCancelable
+    )
+{
+    NTSTATUS status;
+    UCHAR* eventBuffer;
+    size_t eventBufferLength;
+    VCOMTUNNEL_QUEUED_EVENT event;
+    PVCT_EVENT_HEADER header;
+    ULONG eventSize;
+
+    status = WdfRequestRetrieveOutputBuffer(
+        Request,
+        sizeof(VCT_EVENT_HEADER) + VCOMTUNNEL_EVENT_PAYLOAD_SIZE,
+        (PVOID*)&eventBuffer,
+        &eventBufferLength);
+    if (!NT_SUCCESS(status)) {
+        if (UnmarkCancelable) {
+            if (WdfRequestUnmarkCancelable(Request) != STATUS_CANCELLED) {
+                WdfRequestComplete(Request, status);
+            }
+            return STATUS_PENDING;
+        }
+        WdfRequestComplete(Request, status);
+        return STATUS_PENDING;
+    }
+
+    WdfSpinLockAcquire(Context->Lock);
+    if (Context->EventCount == 0) {
+        WdfSpinLockRelease(Context->Lock);
+        if (UnmarkCancelable) {
+            if (WdfRequestUnmarkCancelable(Request) != STATUS_CANCELLED) {
+                WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
+            }
+            return STATUS_PENDING;
+        }
+        WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
+        return STATUS_PENDING;
+    }
+
+    event = Context->EventQueue[Context->EventTail];
+    Context->EventTail = (Context->EventTail + 1) % VCOMTUNNEL_EVENT_QUEUE_SIZE;
+    Context->EventCount--;
+
+    header = (PVCT_EVENT_HEADER)eventBuffer;
+    RtlZeroMemory(header, sizeof(*header));
+    header->Size = sizeof(VCT_EVENT_HEADER) + event.PayloadSize;
+    header->Type = event.Type;
+    header->Flags = event.Flags;
+    header->Sequence = ++Context->NextSequence;
+    if (event.PayloadSize > 0) {
+        RtlCopyMemory(eventBuffer + sizeof(VCT_EVENT_HEADER), event.Payload, event.PayloadSize);
+    }
+    eventSize = header->Size;
+    WdfSpinLockRelease(Context->Lock);
+
+    if (UnmarkCancelable) {
+        if (WdfRequestUnmarkCancelable(Request) != STATUS_CANCELLED) {
+            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, eventSize);
+        }
+        return STATUS_PENDING;
+    }
+
+    WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, eventSize);
+    return STATUS_PENDING;
+}
+
+static VOID
+VctQueueControlEvent(
+    _Inout_ PDEVICE_CONTEXT Context,
+    _In_ USHORT Type,
+    _In_reads_bytes_opt_(PayloadSize) const VOID* Payload,
+    _In_ ULONG PayloadSize
+    )
+{
+    WDFREQUEST serviceWait = NULL;
+
+    WdfSpinLockAcquire(Context->Lock);
+    if (Context->ServiceAttached) {
+        VctEnqueueControlEventLocked(Context, Type, Payload, PayloadSize);
+        if (Context->PendingServiceWait != NULL) {
+            serviceWait = Context->PendingServiceWait;
+            Context->PendingServiceWait = NULL;
+        }
+    }
+    WdfSpinLockRelease(Context->Lock);
+
+    if (serviceWait != NULL) {
+        VctCompleteControlEventFromQueue(serviceWait, Context, TRUE);
+    }
+}
+
+static VOID
+VctEnqueueCurrentStateLocked(
+    _Inout_ PDEVICE_CONTEXT Context
+    )
+{
+    VCT_BAUD_RATE_EVENT baudRateEvent;
+    VCT_LINE_CONTROL_EVENT lineControlEvent;
+    VCT_HANDFLOW_EVENT handflowEvent;
+    VCT_MODEM_CONTROL_EVENT modemControlEvent;
+
+    baudRateEvent.BaudRate = Context->BaudRate.BaudRate;
+    VctEnqueueControlEventLocked(
+        Context,
+        VComTunnelEventSetBaudRate,
+        &baudRateEvent,
+        sizeof(baudRateEvent));
+
+    RtlZeroMemory(&lineControlEvent, sizeof(lineControlEvent));
+    lineControlEvent.StopBits = Context->LineControl.StopBits;
+    lineControlEvent.Parity = Context->LineControl.Parity;
+    lineControlEvent.WordLength = Context->LineControl.WordLength;
+    VctEnqueueControlEventLocked(
+        Context,
+        VComTunnelEventSetLineControl,
+        &lineControlEvent,
+        sizeof(lineControlEvent));
+
+    handflowEvent.ControlHandShake = Context->Handflow.ControlHandShake;
+    handflowEvent.FlowReplace = Context->Handflow.FlowReplace;
+    VctEnqueueControlEventLocked(
+        Context,
+        VComTunnelEventSetHandflow,
+        &handflowEvent,
+        sizeof(handflowEvent));
+
+    RtlZeroMemory(&modemControlEvent, sizeof(modemControlEvent));
+    modemControlEvent.Mask = VCOMTUNNEL_MODEM_CONTROL_DTR | VCOMTUNNEL_MODEM_CONTROL_RTS;
+    modemControlEvent.Dtr = Context->Dtr;
+    modemControlEvent.Rts = Context->Rts;
+    VctEnqueueControlEventLocked(
+        Context,
+        VComTunnelEventSetModemControl,
+        &modemControlEvent,
+        sizeof(modemControlEvent));
+}
+
 static NTSTATUS
 VctCompleteTxEventFromQueue(
     _In_ WDFREQUEST Request,
@@ -273,6 +446,7 @@ VctCompleteAttach(
     Context->ServiceAttached = TRUE;
     Context->ServiceFileObject = fileObject;
     Context->ConnectionState = VComTunnelConnecting;
+    VctEnqueueCurrentStateLocked(Context);
     WdfSpinLockRelease(Context->Lock);
 
     RtlZeroMemory(&response, sizeof(response));
@@ -304,6 +478,9 @@ VctQueueServiceWait(
         status = STATUS_ACCESS_DENIED;
     } else if (Context->PendingServiceWait != NULL) {
         status = STATUS_DEVICE_BUSY;
+    } else if (Context->EventCount > 0) {
+        WdfSpinLockRelease(Context->Lock);
+        return VctCompleteControlEventFromQueue(Request, Context, FALSE);
     } else if (Context->TxCount > 0) {
         queuedBytes = min(Context->TxCount, (ULONG)(VCOMTUNNEL_MAX_EVENT_BYTES - sizeof(VCT_EVENT_HEADER)));
     } else {
@@ -500,7 +677,17 @@ VctEvtIoDeviceControl(
 
     switch (IoControlCode) {
     case IOCTL_SERIAL_SET_BAUD_RATE:
-        status = VctCopyInputBuffer(Request, &context->BaudRate, sizeof(context->BaudRate));
+        {
+            SERIAL_BAUD_RATE baudRate;
+            VCT_BAUD_RATE_EVENT event;
+
+            status = VctCopyInputBuffer(Request, &baudRate, sizeof(baudRate));
+            if (NT_SUCCESS(status)) {
+                context->BaudRate = baudRate;
+                event.BaudRate = baudRate.BaudRate;
+                VctQueueControlEvent(context, VComTunnelEventSetBaudRate, &event, sizeof(event));
+            }
+        }
         break;
 
     case IOCTL_SERIAL_GET_BAUD_RATE:
@@ -508,7 +695,20 @@ VctEvtIoDeviceControl(
         break;
 
     case IOCTL_SERIAL_SET_LINE_CONTROL:
-        status = VctCopyInputBuffer(Request, &context->LineControl, sizeof(context->LineControl));
+        {
+            SERIAL_LINE_CONTROL lineControl;
+            VCT_LINE_CONTROL_EVENT event;
+
+            status = VctCopyInputBuffer(Request, &lineControl, sizeof(lineControl));
+            if (NT_SUCCESS(status)) {
+                context->LineControl = lineControl;
+                RtlZeroMemory(&event, sizeof(event));
+                event.StopBits = lineControl.StopBits;
+                event.Parity = lineControl.Parity;
+                event.WordLength = lineControl.WordLength;
+                VctQueueControlEvent(context, VComTunnelEventSetLineControl, &event, sizeof(event));
+            }
+        }
         break;
 
     case IOCTL_SERIAL_GET_LINE_CONTROL:
@@ -532,7 +732,18 @@ VctEvtIoDeviceControl(
         break;
 
     case IOCTL_SERIAL_SET_HANDFLOW:
-        status = VctCopyInputBuffer(Request, &context->Handflow, sizeof(context->Handflow));
+        {
+            SERIAL_HANDFLOW handflow;
+            VCT_HANDFLOW_EVENT event;
+
+            status = VctCopyInputBuffer(Request, &handflow, sizeof(handflow));
+            if (NT_SUCCESS(status)) {
+                context->Handflow = handflow;
+                event.ControlHandShake = handflow.ControlHandShake;
+                event.FlowReplace = handflow.FlowReplace;
+                VctQueueControlEvent(context, VComTunnelEventSetHandflow, &event, sizeof(event));
+            }
+        }
         break;
 
     case IOCTL_SERIAL_GET_HANDFLOW:
@@ -587,26 +798,92 @@ VctEvtIoDeviceControl(
         break;
 
     case IOCTL_SERIAL_SET_DTR:
+        {
+            VCT_MODEM_CONTROL_EVENT event;
+
+            RtlZeroMemory(&event, sizeof(event));
+            event.Mask = VCOMTUNNEL_MODEM_CONTROL_DTR;
+            event.Dtr = TRUE;
+            event.Rts = context->Rts;
+            VctQueueControlEvent(context, VComTunnelEventSetModemControl, &event, sizeof(event));
+        }
         context->Dtr = TRUE;
         break;
 
     case IOCTL_SERIAL_CLR_DTR:
+        {
+            VCT_MODEM_CONTROL_EVENT event;
+
+            RtlZeroMemory(&event, sizeof(event));
+            event.Mask = VCOMTUNNEL_MODEM_CONTROL_DTR;
+            event.Dtr = FALSE;
+            event.Rts = context->Rts;
+            VctQueueControlEvent(context, VComTunnelEventSetModemControl, &event, sizeof(event));
+        }
         context->Dtr = FALSE;
         break;
 
     case IOCTL_SERIAL_SET_RTS:
+        {
+            VCT_MODEM_CONTROL_EVENT event;
+
+            RtlZeroMemory(&event, sizeof(event));
+            event.Mask = VCOMTUNNEL_MODEM_CONTROL_RTS;
+            event.Dtr = context->Dtr;
+            event.Rts = TRUE;
+            VctQueueControlEvent(context, VComTunnelEventSetModemControl, &event, sizeof(event));
+        }
         context->Rts = TRUE;
         break;
 
     case IOCTL_SERIAL_CLR_RTS:
+        {
+            VCT_MODEM_CONTROL_EVENT event;
+
+            RtlZeroMemory(&event, sizeof(event));
+            event.Mask = VCOMTUNNEL_MODEM_CONTROL_RTS;
+            event.Dtr = context->Dtr;
+            event.Rts = FALSE;
+            VctQueueControlEvent(context, VComTunnelEventSetModemControl, &event, sizeof(event));
+        }
         context->Rts = FALSE;
         break;
 
     case IOCTL_SERIAL_PURGE:
+        {
+            ULONG purgeMask = 0;
+            VCT_PURGE_EVENT event;
+
+            status = VctCopyInputBuffer(Request, &purgeMask, sizeof(purgeMask));
+            if (NT_SUCCESS(status)) {
+                event.Mask = purgeMask;
+                VctQueueControlEvent(context, VComTunnelEventPurge, &event, sizeof(event));
+            }
+        }
+        break;
+
     case IOCTL_SERIAL_RESET_DEVICE:
-    case IOCTL_SERIAL_SET_BREAK_ON:
-    case IOCTL_SERIAL_SET_BREAK_OFF:
     case IOCTL_SERIAL_SET_QUEUE_SIZE:
+        break;
+
+    case IOCTL_SERIAL_SET_BREAK_ON:
+        {
+            VCT_BREAK_EVENT event;
+
+            RtlZeroMemory(&event, sizeof(event));
+            event.Enabled = TRUE;
+            VctQueueControlEvent(context, VComTunnelEventSetBreak, &event, sizeof(event));
+        }
+        break;
+
+    case IOCTL_SERIAL_SET_BREAK_OFF:
+        {
+            VCT_BREAK_EVENT event;
+
+            RtlZeroMemory(&event, sizeof(event));
+            event.Enabled = FALSE;
+            VctQueueControlEvent(context, VComTunnelEventSetBreak, &event, sizeof(event));
+        }
         break;
 
     case IOCTL_VCOMTUNNEL_ATTACH:
@@ -615,6 +892,28 @@ VctEvtIoDeviceControl(
 
     case IOCTL_VCOMTUNNEL_SET_CONNECTION_STATE:
         status = VctCopyInputBuffer(Request, &context->ConnectionState, sizeof(context->ConnectionState));
+        break;
+
+    case IOCTL_VCOMTUNNEL_SET_MODEM_STATE:
+        {
+            VCT_MODEM_STATE modemState;
+
+            status = VctCopyInputBuffer(Request, &modemState, sizeof(modemState));
+            if (NT_SUCCESS(status)) {
+                context->ModemStatus = modemState.ModemStatus;
+            }
+        }
+        break;
+
+    case IOCTL_VCOMTUNNEL_SET_LINE_STATE:
+        {
+            VCT_LINE_STATE lineState;
+
+            status = VctCopyInputBuffer(Request, &lineState, sizeof(lineState));
+            if (NT_SUCCESS(status)) {
+                context->LineErrors = lineState.Errors;
+            }
+        }
         break;
 
     case IOCTL_VCOMTUNNEL_DETACH:
