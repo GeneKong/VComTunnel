@@ -4,7 +4,8 @@ Use this checklist before tagging a public VComTunnel release.
 
 ## Repository
 
-- Add a repository `LICENSE` file selected by the project owner.
+- Confirm the repository `LICENSE` file still matches the intended release
+  terms.
 - Confirm third-party notices for bundled `com0com` and `hub4com` archives.
 - Confirm the GitHub repository description and topics match the current scope.
 - Keep generated release archives, driver build outputs, logs, and local smoke

@@ -314,5 +314,4 @@ read [CONTRIBUTING.md](CONTRIBUTING.md) before sending changes.
 
 ## License
 
-A repository license has not been selected yet. Choose and add a `LICENSE` file
-before treating a public package as an open-source release.
+VComTunnel is released under the MIT License. See [LICENSE](LICENSE).
