@@ -149,6 +149,9 @@ vcomtunnelctl service install C:\Tools\VComTunnel\VComTunnel.Service.exe
 vcomtunnelctl service start
 ```
 
+`service install` 也会修复已存在的 `VComTunnel` 服务注册，把 `binPath`
+更新为当前传入的 Service 可执行文件路径，然后再启动服务。
+
 卸载或停止：
 
 ```powershell

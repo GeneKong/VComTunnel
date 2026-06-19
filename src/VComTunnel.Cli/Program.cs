@@ -437,9 +437,22 @@ internal static class VComTunnelCtl
             return 2;
         }
 
+        if (IsServiceInstalled())
+        {
+            Console.WriteLine("Updating existing Windows service through sc.exe.");
+            Console.WriteLine($"Service path: {servicePath}");
+            return RunSc("config", ServiceName, "binPath=", servicePath, "start=", "auto", "DisplayName=", "VComTunnel");
+        }
+
         Console.WriteLine("Installing Windows service through sc.exe.");
         Console.WriteLine("The service app can also be run directly for console-mode debugging.");
         return RunSc("create", ServiceName, "binPath=", servicePath, "start=", "auto", "DisplayName=", "VComTunnel");
+    }
+
+    private static bool IsServiceInstalled()
+    {
+        var result = RunScCapture("query", ServiceName);
+        return result.ExitCode == 0;
     }
 
     private static string? ResolveServiceExe(string? explicitServicePath)
@@ -482,6 +495,36 @@ internal static class VComTunnelCtl
         process.WaitForExit();
         return process.ExitCode;
     }
+
+    private static ScResult RunScCapture(params string[] args)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "sc.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        foreach (var arg in args)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(startInfo);
+        if (process is null)
+        {
+            return new ScResult(1, "", "Could not start sc.exe.");
+        }
+
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return new ScResult(process.ExitCode, output, error);
+    }
+
+    private sealed record ScResult(int ExitCode, string Output, string Error);
 
     private static int Help()
     {

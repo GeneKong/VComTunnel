@@ -88,6 +88,7 @@ internal static class GuiText
         ["Status.ServiceStopNotConfirmed"] = "Service could not be stopped. Run the GUI as administrator or stop VComTunnel.Service from Services, then retry.",
         ["Status.ServiceProcessStopped"] = "Stopped VComTunnel.Service process {0}.",
         ["Status.ServiceProcessStopFailed"] = "Failed to stop VComTunnel.Service process {0}: {1}",
+        ["Status.ServicePathMismatch"] = "Installed service path does not match this app. Registered: {0}; expected: {1}",
         ["Status.ServiceConnected"] = "Service: connected, {0} mapping(s)",
         ["Status.InitialRefreshFailed"] = "Initial refresh failed: {0}",
         ["Status.WindowsServiceStarting"] = "Windows service: starting...",
@@ -97,8 +98,10 @@ internal static class GuiText
         ["Status.AutoSaved"] = "Changes saved.",
         ["Status.AutoStartCanceled"] = "Auto-start was canceled for {0}.",
         ["Status.AutoStartSavedNeedsService"] = "Auto-start was saved. It will take effect after the background service is installed and started.",
+        ["Status.AutoStartSavedNeedsServiceRepair"] = "Auto-start was saved, but the background service still points to another app path. Repair the service before relying on startup.",
         ["Status.AutoStartSavedServiceStopped"] = "Auto-start was saved. It will take effect the next time VComTunnel.Service starts.",
         ["Status.AutoStartServiceCheckFailed"] = "Auto-start service check failed: {0}",
+        ["Status.AutoStartServiceRepaired"] = "Background service registration was repaired and started.",
         ["Status.AutoStartServiceReady"] = "Auto-start is ready. The background service is running.",
         ["Status.SavedMappings"] = "Saved {0} mapping(s).",
         ["Status.AddedMapping"] = "Added a mapping. Edit it, then Start when ready.",
@@ -183,6 +186,7 @@ internal static class GuiText
         ["Prompt.KmdfExperimentalDriverWarning"] = "VComTunnel.Serial is an experimental KMDF driver and is not a production-signed driver package.\r\n\r\nContinue only on a development/test Windows machine. Windows may require Test Mode and a reboot; Secure Boot or driver signing policy can block installation.\r\n\r\nThis launches VComTunnel.Cli with administrator approval.",
         ["Prompt.LaunchCom0comInstaller"] = "com0com driver still needs an elevated installer run. Launch it now?",
         ["Prompt.AutoStartInstallService"] = "Auto-start requires the VComTunnel background service.\r\n\r\nAfter installation, Windows starts VComTunnel.Service at boot and it starts mappings with Auto enabled. Without the background service, this setting only takes effect when the service is already running.\r\n\r\nInstall the background service now?\r\n\r\nYes = install service and keep Auto enabled\r\nNo = keep Auto enabled only\r\nCancel = undo this Auto change",
+        ["Prompt.AutoStartRepairService"] = "The VComTunnel background service is installed, but it points to a different app path.\r\n\r\nRegistered service path:\r\n{0}\r\n\r\nExpected path:\r\n{1}\r\n\r\nRepair the service registration now?\r\n\r\nYes = repair service and keep Auto enabled\r\nNo = keep Auto enabled only\r\nCancel = undo this Auto change",
         ["Prompt.AutoStartStartService"] = "The VComTunnel background service is installed but not running.\r\n\r\nStart it now so Auto-enabled mappings can run from the background service?\r\n\r\nYes = start service and keep Auto enabled\r\nNo = keep Auto enabled only\r\nCancel = undo this Auto change",
         ["Prompt.InstallService"] = "Install VComTunnel as a Windows background service?\r\n\r\nThis enables Windows to keep the tunnel service running after the GUI closes and start it automatically at boot.",
         ["Prompt.UninstallService"] = "Uninstall the VComTunnel Windows background service?\r\n\r\nThis does not delete mappings or COM ports.",
@@ -224,7 +228,8 @@ internal static class GuiText
         ["Log.BackingChanged"] = "{0}: Backing cannot equal Visible; changed backing to {1}.",
         ["Log.KmdfBackingCleared"] = "{0}: KMDF mappings do not use Backing; cleared it.",
         ["Msg.Yes"] = "Yes",
-        ["Msg.No"] = "No"
+        ["Msg.No"] = "No",
+        ["Msg.Unknown"] = "(unknown)"
     };
 
     private static readonly IReadOnlyDictionary<string, string> Chinese = new Dictionary<string, string>
@@ -304,6 +309,7 @@ internal static class GuiText
         ["Status.ServiceStopNotConfirmed"] = "服务未能停止。请用管理员身份运行 GUI，或在“服务”中停止 VComTunnel.Service 后重试。",
         ["Status.ServiceProcessStopped"] = "已停止 VComTunnel.Service 进程 {0}。",
         ["Status.ServiceProcessStopFailed"] = "停止 VComTunnel.Service 进程 {0} 失败：{1}",
+        ["Status.ServicePathMismatch"] = "已安装服务路径与当前程序不一致。当前注册：{0}；应使用：{1}",
         ["Status.ServiceConnected"] = "服务：已连接，{0} 条映射",
         ["Status.InitialRefreshFailed"] = "初始刷新失败：{0}",
         ["Status.WindowsServiceStarting"] = "Windows 服务：启动中...",
@@ -313,8 +319,10 @@ internal static class GuiText
         ["Status.AutoSaved"] = "改动已保存。",
         ["Status.AutoStartCanceled"] = "已取消 {0} 的自启设置。",
         ["Status.AutoStartSavedNeedsService"] = "自启配置已保存。安装并启动后台服务后才会生效。",
+        ["Status.AutoStartSavedNeedsServiceRepair"] = "自启配置已保存，但后台服务仍指向其它程序路径。依赖开机自启前请先修复服务注册。",
         ["Status.AutoStartSavedServiceStopped"] = "自启配置已保存。下次 VComTunnel.Service 启动时生效。",
         ["Status.AutoStartServiceCheckFailed"] = "自启服务检查失败：{0}",
+        ["Status.AutoStartServiceRepaired"] = "后台服务注册已修复并启动。",
         ["Status.AutoStartServiceReady"] = "自启已就绪，后台服务正在运行。",
         ["Status.SavedMappings"] = "已保存 {0} 条映射。",
         ["Status.AddedMapping"] = "已添加映射。编辑好后直接启动即可。",
@@ -399,6 +407,7 @@ internal static class GuiText
         ["Prompt.KmdfExperimentalDriverWarning"] = "VComTunnel.Serial 是实验性 KMDF 驱动，目前不是正式生产签名驱动包。\r\n\r\n仅建议在开发/测试 Windows 机器上继续。Windows 可能需要启用测试签名模式并重启；开启 Secure Boot 或驱动签名策略可能会阻止安装。\r\n\r\n本操作会启动 VComTunnel.Cli 并请求管理员批准。",
         ["Prompt.LaunchCom0comInstaller"] = "com0com 驱动仍需要提权安装。现在启动安装器？",
         ["Prompt.AutoStartInstallService"] = "启用自启需要 VComTunnel 后台服务。\r\n\r\n安装后台服务后，Windows 启动时会启动 VComTunnel.Service，并自动启动勾选“自启”的映射。如果不安装，当前设置只会在服务已经运行时生效。\r\n\r\n是否现在安装后台服务？\r\n\r\n是 = 安装服务并保留自启\r\n否 = 只保留自启配置\r\n取消 = 撤销这次自启修改",
+        ["Prompt.AutoStartRepairService"] = "VComTunnel 后台服务已安装，但它指向的不是当前程序路径。\r\n\r\n当前服务注册路径：\r\n{0}\r\n\r\n应使用路径：\r\n{1}\r\n\r\n是否现在修复后台服务注册？\r\n\r\n是 = 修复服务并保留自启\r\n否 = 只保留自启配置\r\n取消 = 撤销这次自启修改",
         ["Prompt.AutoStartStartService"] = "VComTunnel 后台服务已安装，但当前没有运行。\r\n\r\n是否现在启动后台服务，让勾选“自启”的映射由后台服务运行？\r\n\r\n是 = 启动服务并保留自启\r\n否 = 只保留自启配置\r\n取消 = 撤销这次自启修改",
         ["Prompt.InstallService"] = "将 VComTunnel 安装为 Windows 后台服务？\r\n\r\n这样关闭 GUI 后隧道服务仍可继续运行，并可随系统启动。",
         ["Prompt.UninstallService"] = "卸载 VComTunnel Windows 后台服务？\r\n\r\n这不会删除映射或 COM 端口。",
@@ -440,7 +449,8 @@ internal static class GuiText
         ["Log.BackingChanged"] = "{0}：后端口不能等于可见端口，已改为 {1}。",
         ["Log.KmdfBackingCleared"] = "{0}：KMDF 映射不使用后端口，已清空。",
         ["Msg.Yes"] = "是",
-        ["Msg.No"] = "否"
+        ["Msg.No"] = "否",
+        ["Msg.Unknown"] = "（未知）"
     };
 
     public static UiLanguage DefaultLanguage =>

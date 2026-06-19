@@ -572,6 +572,7 @@ public partial class MainWindow : Window
             return false;
         }
 
+        await RunServiceCtlElevatedAsync("stop", [], reportFailure: false);
         StopLocalServiceProcesses();
         await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(8));
 
@@ -599,14 +600,22 @@ public partial class MainWindow : Window
         CancelPendingAutoSave();
         try
         {
-            var state = await GetInstalledWindowsServiceStateAsync();
-            if (state == InstalledWindowsServiceState.Running)
+            var servicePath = ResolveServicePath();
+            var service = await GetInstalledWindowsServiceInfoAsync();
+            var servicePathMatches = ServiceBinaryPathMatches(service.BinaryPath, servicePath);
+            if (service.State != InstalledWindowsServiceState.NotInstalled && !servicePathMatches)
+            {
+                await HandleAutoStartWithMismatchedServiceAsync(row, service.BinaryPath, servicePath);
+                return;
+            }
+
+            if (service.State == InstalledWindowsServiceState.Running)
             {
                 ScheduleAutoSave();
                 return;
             }
 
-            if (state == InstalledWindowsServiceState.NotInstalled)
+            if (service.State == InstalledWindowsServiceState.NotInstalled)
             {
                 await HandleAutoStartWithoutInstalledServiceAsync(row);
                 return;
@@ -656,6 +665,43 @@ public partial class MainWindow : Window
         if (await InstallServiceCoreAsync())
         {
             SetStatus(T("Status.AutoStartServiceReady"));
+        }
+    }
+
+    private async Task HandleAutoStartWithMismatchedServiceAsync(MappingRow row, string? currentServicePath, string? expectedServicePath)
+    {
+        var answer = MessageBox.Show(
+            TF(
+                "Prompt.AutoStartRepairService",
+                string.IsNullOrWhiteSpace(currentServicePath) ? T("Msg.Unknown") : currentServicePath,
+                string.IsNullOrWhiteSpace(expectedServicePath) ? T("Msg.Unknown") : expectedServicePath),
+            T("Title.AutoStart"),
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Warning);
+
+        if (answer == MessageBoxResult.Cancel)
+        {
+            RevertAutoStart(row);
+            return;
+        }
+
+        if (answer == MessageBoxResult.No)
+        {
+            if (await SaveMappingsAsync(logSuccess: false))
+            {
+                SetStatus(T("Status.AutoStartSavedNeedsServiceRepair"), "warn");
+            }
+            return;
+        }
+
+        if (!await SaveMappingsAsync(logSuccess: false))
+        {
+            return;
+        }
+
+        if (await InstallServiceCoreAsync())
+        {
+            SetStatus(T("Status.AutoStartServiceRepaired"));
         }
     }
 
@@ -845,12 +891,15 @@ public partial class MainWindow : Window
         DependenciesText.Text += Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
     }
 
-    private async Task<bool> RunServiceCtlElevatedAsync(string action, IReadOnlyList<string> arguments)
+    private async Task<bool> RunServiceCtlElevatedAsync(string action, IReadOnlyList<string> arguments, bool reportFailure = true)
     {
         var cliPath = ResolveCliPath();
         if (cliPath is null)
         {
-            SetStatus(T("Status.ServiceCliNotFound"), "error");
+            if (reportFailure)
+            {
+                SetStatus(T("Status.ServiceCliNotFound"), "error");
+            }
             return false;
         }
 
@@ -884,41 +933,113 @@ public partial class MainWindow : Window
                 return true;
             }
 
-            SetStatus(TF("Status.ServiceControlFailed", action, $"exit code {process.ExitCode}"), "error");
+            if (reportFailure)
+            {
+                SetStatus(TF("Status.ServiceControlFailed", action, $"exit code {process.ExitCode}"), "error");
+            }
             return false;
         }
         catch (Exception ex)
         {
-            SetStatus(TF("Status.ServiceControlFailed", action, ex.Message), "error");
+            if (reportFailure)
+            {
+                SetStatus(TF("Status.ServiceControlFailed", action, ex.Message), "error");
+            }
             return false;
         }
     }
 
-    private async Task<InstalledWindowsServiceState> GetInstalledWindowsServiceStateAsync()
+    private async Task<InstalledWindowsServiceInfo> GetInstalledWindowsServiceInfoAsync()
     {
         if (!OperatingSystem.IsWindows())
         {
-            return InstalledWindowsServiceState.NotInstalled;
+            return new InstalledWindowsServiceInfo(InstalledWindowsServiceState.NotInstalled, null);
         }
 
         var query = await RunProcessAsync("sc.exe", ["query", "VComTunnel"]);
         if (query.ExitCode != 0)
         {
-            return InstalledWindowsServiceState.NotInstalled;
+            return new InstalledWindowsServiceInfo(InstalledWindowsServiceState.NotInstalled, null);
         }
 
         var text = $"{query.Output} {query.Error}";
+        var state = InstalledWindowsServiceState.Installed;
         if (text.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
         {
-            return InstalledWindowsServiceState.Running;
+            state = InstalledWindowsServiceState.Running;
         }
-
-        if (text.Contains("STOPPED", StringComparison.OrdinalIgnoreCase))
+        else if (text.Contains("STOPPED", StringComparison.OrdinalIgnoreCase))
         {
-            return InstalledWindowsServiceState.Stopped;
+            state = InstalledWindowsServiceState.Stopped;
         }
 
-        return InstalledWindowsServiceState.Installed;
+        var config = await RunProcessAsync("sc.exe", ["qc", "VComTunnel"]);
+        var binaryPath = config.ExitCode == 0
+            ? ExtractServiceBinaryPath(config.Output)
+            : null;
+        return new InstalledWindowsServiceInfo(state, binaryPath);
+    }
+
+    private static string? ExtractServiceBinaryPath(string scConfigOutput)
+    {
+        foreach (var line in scConfigOutput.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var nameIndex = line.IndexOf("BINARY_PATH_NAME", StringComparison.OrdinalIgnoreCase);
+            if (nameIndex < 0)
+            {
+                continue;
+            }
+
+            var valueIndex = line.IndexOf(':', nameIndex);
+            if (valueIndex >= 0 && valueIndex + 1 < line.Length)
+            {
+                return line[(valueIndex + 1)..].Trim();
+            }
+        }
+
+        return null;
+    }
+
+    private static bool ServiceBinaryPathMatches(string? registeredPath, string? expectedPath)
+    {
+        var registeredExe = ExtractExecutablePath(registeredPath);
+        var expectedExe = ExtractExecutablePath(expectedPath);
+        if (string.IsNullOrWhiteSpace(registeredExe) || string.IsNullOrWhiteSpace(expectedExe))
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(registeredExe),
+                Path.GetFullPath(expectedExe),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return string.Equals(registeredExe, expectedExe, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static string? ExtractExecutablePath(string? commandLine)
+    {
+        var value = commandLine?.Trim();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        if (value.StartsWith('"'))
+        {
+            var endQuote = value.IndexOf('"', 1);
+            return endQuote > 1 ? value[1..endQuote] : value.Trim('"');
+        }
+
+        var exeIndex = value.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+        return exeIndex >= 0
+            ? value[..(exeIndex + 4)].Trim()
+            : value;
     }
 
     private async Task<bool> TryStartInstalledWindowsServiceAsync()
@@ -928,13 +1049,26 @@ public partial class MainWindow : Window
             return false;
         }
 
-        var query = await RunProcessAsync("sc.exe", ["query", "VComTunnel"]);
-        if (query.ExitCode != 0)
+        var service = await GetInstalledWindowsServiceInfoAsync();
+        if (service.State == InstalledWindowsServiceState.NotInstalled)
         {
             return false;
         }
 
-        if (!query.Output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
+        var expectedServicePath = ResolveServicePath();
+        if (!ServiceBinaryPathMatches(service.BinaryPath, expectedServicePath))
+        {
+            AppendGuiLog(
+                "warn",
+                T("Log.Gui"),
+                TF(
+                    "Status.ServicePathMismatch",
+                    string.IsNullOrWhiteSpace(service.BinaryPath) ? T("Msg.Unknown") : service.BinaryPath,
+                    string.IsNullOrWhiteSpace(expectedServicePath) ? T("Msg.Unknown") : expectedServicePath));
+            return false;
+        }
+
+        if (service.State != InstalledWindowsServiceState.Running)
         {
             ServiceStateText.Text = T("Status.WindowsServiceStarting");
             var start = await RunProcessAsync("sc.exe", ["start", "VComTunnel"]);
@@ -2936,6 +3070,8 @@ internal sealed record KmdfCtlResult(bool Success, string Message);
 internal sealed record KmdfWaitResult(bool Success, string? FailureMessage);
 
 internal sealed record ProcessRunResult(int ExitCode, string Output, string Error);
+
+internal sealed record InstalledWindowsServiceInfo(InstalledWindowsServiceState State, string? BinaryPath);
 
 internal enum InstalledWindowsServiceState
 {

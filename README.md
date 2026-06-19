@@ -165,6 +165,10 @@ For published builds, pass the explicit service executable if auto-discovery doe
 vcomtunnelctl service install C:\Tools\VComTunnel\VComTunnel.Service.exe
 ```
 
+`service install` also repairs an existing `VComTunnel` service registration by
+updating its `binPath` to the current service executable before the service is
+started again.
+
 When the GUI needs the local API, it first connects to an installed
 `VComTunnel` Windows service; if that is not installed, it starts
 `VComTunnel.Service.exe --console` as a hidden background process. Use
