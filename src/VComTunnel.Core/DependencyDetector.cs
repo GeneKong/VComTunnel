@@ -14,7 +14,7 @@ public sealed class DependencyDetector
 
     public SystemDependencyReport Detect()
     {
-        var setupc = FindExecutable("setupc.exe");
+        var setupc = FindSetupc();
         var hub4com = FindExecutable("hub4com.exe");
         var com2tcp = FindExecutable("com2tcp-rfc2217.bat");
         var pnputil = FindOnPath("pnputil.exe");
@@ -39,14 +39,14 @@ public sealed class DependencyDetector
 
     public string? FindCom2TcpRfc2217() => FindExecutable("com2tcp-rfc2217.bat");
 
-    public string? FindSetupc() => FindExecutable("setupc.exe");
+    public string? FindSetupc() => FindExecutable("setupc.exe", includeToolsCache: false);
 
     private static DependencyStatus ToStatus(string name, string? path, string missingMessage)
     {
         return new DependencyStatus(name, path is not null, path, path is null ? missingMessage : "Found.");
     }
 
-    private string? FindExecutable(string name)
+    private string? FindExecutable(string name, bool includeToolsCache = true)
     {
         var pathMatch = FindOnPath(name);
         if (pathMatch is not null)
@@ -56,6 +56,11 @@ public sealed class DependencyDetector
 
         foreach (var root in _candidateRoots.Where(Directory.Exists))
         {
+            if (!includeToolsCache && IsToolsCacheRoot(root))
+            {
+                continue;
+            }
+
             var found = TryFindUnderRoot(root, name);
             if (found is not null)
             {
@@ -81,6 +86,22 @@ public sealed class DependencyDetector
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or DirectoryNotFoundException)
         {
             return null;
+        }
+    }
+
+    private static bool IsToolsCacheRoot(string root)
+    {
+        try
+        {
+            var candidate = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var tools = Path.GetFullPath(AppPaths.ToolsDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(candidate, tools, StringComparison.OrdinalIgnoreCase)
+                || candidate.StartsWith(tools + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || candidate.StartsWith(tools + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 

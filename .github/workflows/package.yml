@@ -22,7 +22,7 @@ on:
       bundle_dependencies:
         description: "Bundle com0com/hub4com dependency archives"
         required: true
-        default: false
+        default: true
         type: boolean
       upload_release:
         description: "Upload artifacts to the matching GitHub Release"
@@ -44,7 +44,7 @@ jobs:
     env:
       PACKAGE_RUNTIME: ${{ github.event.inputs.runtime || 'win-x64' }}
       PACKAGE_MSI: ${{ github.event.inputs.msi || 'true' }}
-      PACKAGE_BUNDLE_DEPENDENCIES: ${{ github.event.inputs.bundle_dependencies || 'false' }}
+      PACKAGE_BUNDLE_DEPENDENCIES: ${{ github.event.inputs.bundle_dependencies || 'true' }}
       PACKAGE_UPLOAD_RELEASE: ${{ github.event.inputs.upload_release || 'false' }}
 
     steps:

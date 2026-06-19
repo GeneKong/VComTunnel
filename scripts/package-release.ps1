@@ -200,14 +200,28 @@ $dependencyArchives = @(
     @{
         Name = "hub4com-2.1.0.0-386.zip"
         Url = "https://sourceforge.net/projects/com0com/files/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip/download"
+        Urls = @(
+            "https://downloads.sourceforge.net/project/com0com/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip?use_mirror=cytranet",
+            "https://downloads.sourceforge.net/project/com0com/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip",
+            "https://sourceforge.net/projects/com0com/files/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip/download",
+            "https://netix.dl.sourceforge.net/project/com0com/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip",
+            "https://cytranet.dl.sourceforge.net/project/com0com/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip"
+        )
         Description = "hub4com 2.1.0.0 RFC2217 bridge tools"
         ExpectedFiles = @("hub4com.exe", "com2tcp-rfc2217.bat")
     },
     @{
         Name = "com0com-3.0.0.0-i386-and-x64-signed.zip"
         Url = "https://sourceforge.net/projects/com0com/files/com0com/3.0.0.0/com0com-3.0.0.0-i386-and-x64-signed.zip/download"
+        Urls = @(
+            "https://downloads.sourceforge.net/project/com0com/com0com/3.0.0.0/com0com-3.0.0.0-i386-and-x64-signed.zip?use_mirror=psychz",
+            "https://downloads.sourceforge.net/project/com0com/com0com/3.0.0.0/com0com-3.0.0.0-i386-and-x64-signed.zip",
+            "https://sourceforge.net/projects/com0com/files/com0com/3.0.0.0/com0com-3.0.0.0-i386-and-x64-signed.zip/download",
+            "https://netix.dl.sourceforge.net/project/com0com/com0com/3.0.0.0/com0com-3.0.0.0-i386-and-x64-signed.zip",
+            "https://pilotfiber.dl.sourceforge.net/project/com0com/com0com/3.0.0.0/com0com-3.0.0.0-i386-and-x64-signed.zip"
+        )
         Description = "com0com 3.0.0.0 signed installer package"
-        ExpectedFiles = @("setupc.exe", "Setup_com0com_v3.0.0.0_W7_x64_signed.exe", "Setup_com0com_v3.0.0.0_W7_x86_signed.exe")
+        ExpectedFiles = @("Setup_com0com_v3.0.0.0_W7_x64_signed.exe", "Setup_com0com_v3.0.0.0_W7_x86_signed.exe")
     }
 )
 
@@ -228,19 +242,50 @@ function Assert-DependencyArchive {
                     Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
             )
 
-            foreach ($expected in $ExpectedFiles) {
-                if ($entryNames -contains $expected) {
-                    return
-                }
+            $missing = @($ExpectedFiles | Where-Object { $entryNames -notcontains $_ })
+            if ($missing.Count -eq 0) {
+                return
             }
 
-            throw "missing expected file(s): $($ExpectedFiles -join ', ')"
+            throw "missing expected file(s): $($missing -join ', ')"
         } finally {
             $zip.Dispose()
         }
     } catch {
         throw "Dependency archive '$Path' is not a valid release zip or is missing required files. SourceForge may have returned an HTML download page. Details: $($_.Exception.Message)"
     }
+}
+
+function Save-DependencyArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Archive,
+        [Parameter(Mandatory = $true)]
+        [string]$Target,
+        [string]$Source
+    )
+
+    if ($Source -and (Test-Path $Source)) {
+        Copy-Item -LiteralPath $Source -Destination $Target -Force
+        Assert-DependencyArchive -Path $Target -ExpectedFiles $Archive.ExpectedFiles
+        return
+    }
+
+    $errors = @()
+    foreach ($url in $Archive.Urls) {
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $Target -UserAgent "Wget/1.21.4"
+            Assert-DependencyArchive -Path $Target -ExpectedFiles $Archive.ExpectedFiles
+            return
+        } catch {
+            $errors += "$url => $($_.Exception.Message)"
+            if (Test-Path -LiteralPath $Target) {
+                Remove-Item -LiteralPath $Target -Force
+            }
+        }
+    }
+
+    throw "Could not download a valid dependency archive '$($Archive.Name)'. Tried: $($errors -join ' | ')"
 }
 
 if (-not $SkipBundledDependencies) {
@@ -255,13 +300,7 @@ if (-not $SkipBundledDependencies) {
             Join-Path $DependencyArchiveRoot $archive.Name
         }
 
-        if ($source -and (Test-Path $source)) {
-            Copy-Item -LiteralPath $source -Destination $target -Force
-        } else {
-            Invoke-WebRequest -Uri $archive.Url -OutFile $target
-        }
-
-        Assert-DependencyArchive -Path $target -ExpectedFiles $archive.ExpectedFiles
+        Save-DependencyArchive -Archive $archive -Target $target -Source $source
     }
 }
 

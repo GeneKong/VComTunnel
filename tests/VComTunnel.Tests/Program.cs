@@ -43,6 +43,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("manual stop suppresses fake com2tcp restart", ManualStopSuppressesFakeCom2TcpRestartAsync),
     ("dependency installer extracts tool zips", DependencyInstallerExtractsToolZipsAsync),
     ("dependency installer uses bundled release archives", DependencyInstallerUsesBundledReleaseArchivesAsync),
+    ("dependency installer falls back after invalid mirror", DependencyInstallerFallsBackAfterInvalidMirrorAsync),
     ("dependency installer rejects HTML downloads", DependencyInstallerRejectsHtmlDownloadsAsync)
 };
 
@@ -1259,7 +1260,12 @@ static async Task DependencyInstallerUsesBundledReleaseArchivesAsync()
             new Dictionary<string, string> { ["hub4com.exe"] = "", ["com2tcp-rfc2217.bat"] = "@echo off" });
         CreateZip(
             Path.Combine(archiveRoot, DependencyInstaller.Com0comArchiveName),
-            new Dictionary<string, string> { ["Setup_com0com_v3.0.0.0_W7_x64_signed.exe"] = "", ["Setup_com0com_v3.0.0.0_W7_x86_signed.exe"] = "" });
+            new Dictionary<string, string>
+            {
+                ["setupc.exe"] = "",
+                ["Setup_com0com_v3.0.0.0_W7_x64_signed.exe"] = "",
+                ["Setup_com0com_v3.0.0.0_W7_x86_signed.exe"] = ""
+            });
 
         var http = new HttpClient(new ThrowingHandler());
         var detector = new DependencyDetector([AppPaths.ToolsDirectory], pathOverride: "");
@@ -1275,6 +1281,34 @@ static async Task DependencyInstallerUsesBundledReleaseArchivesAsync()
     {
         Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", oldHome);
         Environment.SetEnvironmentVariable(DependencyInstaller.BundledDependencyArchiveDirectoryVariable, oldArchiveRoot);
+    }
+}
+
+static async Task DependencyInstallerFallsBackAfterInvalidMirrorAsync()
+{
+    using var temp = new TempDir();
+    var oldHome = Environment.GetEnvironmentVariable("VCOMTUNNEL_HOME");
+    Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", temp.Path);
+    try
+    {
+        var handler = new InvalidThenZipHandler();
+        var http = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://example.invalid/")
+        };
+        var detector = new DependencyDetector([AppPaths.ToolsDirectory], pathOverride: "");
+        var installer = new DependencyInstaller(detector, http);
+        var result = await installer.InstallAsync(new DependencyInstallRequest(DownloadCom0com: false));
+
+        var step = result.Steps.Single();
+        AssertTrue(step.Success, step.Message);
+        AssertTrue(handler.RequestCount >= 2, "Installer should try the next dependency URL after an invalid archive.");
+        AssertStringContains(step.Message, "Downloaded from");
+        AssertTrue(File.Exists(Path.Combine(AppPaths.ToolsDirectory, "hub4com", "com2tcp-rfc2217.bat")), "hub4com batch should be extracted after fallback.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", oldHome);
     }
 }
 
@@ -1500,7 +1534,12 @@ internal sealed class ZipHandler : HttpMessageHandler
         var isHub4com = request.RequestUri?.ToString().Contains("hub4com", StringComparison.OrdinalIgnoreCase) == true;
         var files = isHub4com
             ? new Dictionary<string, string> { ["hub4com.exe"] = "", ["com2tcp-rfc2217.bat"] = "@echo off" }
-            : new Dictionary<string, string> { ["Setup_com0com_v3.0.0.0_W7_x64_signed.exe"] = "", ["Setup_com0com_v3.0.0.0_W7_x86_signed.exe"] = "" };
+            : new Dictionary<string, string>
+            {
+                ["setupc.exe"] = "",
+                ["Setup_com0com_v3.0.0.0_W7_x64_signed.exe"] = "",
+                ["Setup_com0com_v3.0.0.0_W7_x86_signed.exe"] = ""
+            };
 
         var stream = new MemoryStream();
         using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
@@ -1539,6 +1578,45 @@ internal sealed class HtmlDownloadHandler : HttpMessageHandler
             Content = new StringContent("<!doctype html><html><body>download page</body></html>")
         };
         return Task.FromResult(response);
+    }
+}
+
+internal sealed class InvalidThenZipHandler : HttpMessageHandler
+{
+    public int RequestCount { get; private set; }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        RequestCount++;
+        if (RequestCount == 1)
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("<!doctype html><html><body>mirror page</body></html>")
+            });
+        }
+
+        var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var exe = archive.CreateEntry("hub4com.exe");
+            using (var writer = new StreamWriter(exe.Open()))
+            {
+                writer.Write("");
+            }
+
+            var batch = archive.CreateEntry("com2tcp-rfc2217.bat");
+            using (var writer = new StreamWriter(batch.Open()))
+            {
+                writer.Write("@echo off");
+            }
+        }
+
+        stream.Position = 0;
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream)
+        });
     }
 }
 

@@ -24,13 +24,14 @@ public partial class MainWindow : Window
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
 
-    private readonly HttpClient _client = new() { BaseAddress = new Uri("http://127.0.0.1:44817") };
+    private readonly HttpClient _client = new() { BaseAddress = new Uri(ServiceEndpoint.DefaultUrl) };
     private readonly ObservableCollection<MappingRow> _mappings = [];
     private readonly ObservableCollection<ComPairRow> _comPairs = [];
     private readonly List<string> _guiLogLines = [];
     private bool _serviceStartAttempted;
     private bool _dependencyPollActive;
     private bool _serviceRestarting;
+    private bool _dependencySetupActive;
     private bool _updatingLanguage;
     private bool _updatingSelection;
     private bool _savingMappings;
@@ -82,6 +83,7 @@ public partial class MainWindow : Window
         SetToolbarButton(RefreshButton, PackIconMaterialKind.Refresh, "Action.Refresh");
         SetToolbarButton(RestartServiceButton, PackIconMaterialKind.Restart, "Action.RestartService");
         SetToolbarButton(AddButton, PackIconMaterialKind.Plus, "Action.Add");
+        SetToolbarButton(SaveButton, PackIconMaterialKind.ContentSave, "Action.Save");
         SetToolbarButton(DeleteMappingButton, PackIconMaterialKind.DeleteOutline, "Action.DeleteMapping");
         SetToolbarButton(StartButton, PackIconMaterialKind.Play, "Action.Start");
         SetToolbarButton(StopButton, PackIconMaterialKind.Stop, "Action.Stop");
@@ -107,12 +109,14 @@ public partial class MainWindow : Window
         SetCommandMenuItem(ClearLogsMenuItem, PackIconMaterialKind.Broom, "Action.ClearLogs");
         SetCommandMenuItem(StartMappingMenuItem, PackIconMaterialKind.Play, "Action.Start");
         SetCommandMenuItem(StopMappingMenuItem, PackIconMaterialKind.Stop, "Action.Stop");
+        SetCommandMenuItem(SaveSelectedMappingMenuItem, PackIconMaterialKind.ContentSave, "Action.Save");
         SetCommandMenuItem(DeleteSelectedMappingMenuItem, PackIconMaterialKind.DeleteOutline, "Action.DeleteMapping");
         SetCommandMenuItem(DeleteSelectedComPairMenuItem, PackIconMaterialKind.DeleteOutline, "Action.DeleteSelectedPair");
 
         TunnelMappingsGroupBox.Header = T("Group.Mappings");
         DependenciesGroupBox.Header = T("Group.DependenciesPairs");
         LogsGroupBox.Header = T("Group.Logs");
+        DependencyProgressText.Text = T("Status.DependencySetupRunning");
         NameColumn.Header = T("Column.Name");
         BackendColumn.Header = T("Column.Backend");
         VisibleComColumn.Header = T("Column.VisibleCom");
@@ -319,7 +323,11 @@ public partial class MainWindow : Window
         var canUseMapping = row is not null;
         var canUsePort = row is not null || port is not null;
         var canUpdateKmdf = row?.IsKmdf == true || port?.IsKmdf == true;
+        var canSaveMappings = _mappings.Count > 0 && !_savingMappings;
 
+        SaveButton.IsEnabled = canSaveMappings;
+        SaveMenuItem.IsEnabled = canSaveMappings;
+        SaveSelectedMappingMenuItem.IsEnabled = canSaveMappings;
         DeleteMappingButton.IsEnabled = canUseMapping;
         DeleteMappingMenuItem.IsEnabled = canUseMapping;
         DeleteSelectedMappingMenuItem.IsEnabled = canUseMapping;
@@ -332,6 +340,8 @@ public partial class MainWindow : Window
         StopMappingCommandMenuItem.IsEnabled = canStop;
         StartMappingMenuItem.IsEnabled = canStart;
         StopMappingMenuItem.IsEnabled = canStop;
+        SetupDepsButton.IsEnabled = !_dependencySetupActive;
+        SetupDepsMenuItem.IsEnabled = !_dependencySetupActive;
     }
 
     private void Add_Click(object sender, RoutedEventArgs e)
@@ -356,6 +366,7 @@ public partial class MainWindow : Window
         MappingsGrid.Items.Refresh();
         SetStatus(T("Status.AddedMapping"));
         UpdateMappingCommandState();
+        ScheduleAutoSave();
     }
 
     private async Task RefreshAsync()
@@ -906,7 +917,13 @@ public partial class MainWindow : Window
 
     private string BuildOfflineMessage(Exception ex)
     {
-        return TF("Diag.Offline", ex.Message);
+        return TF("Diag.Offline", ServiceEndpoint.DefaultUrl, ex.Message);
+    }
+
+    private static bool IsLocalServiceApiException(Exception ex)
+    {
+        return ex is HttpRequestException or TaskCanceledException
+            || ex.InnerException is HttpRequestException;
     }
 
     private async Task SaveAsync()
@@ -1097,6 +1114,12 @@ public partial class MainWindow : Window
                 await PromptUpdateKmdfDriverAfterProtocolFaultAsync(row, lastError);
             }
         }
+        catch (Exception ex) when (IsLocalServiceApiException(ex))
+        {
+            SetStatus(TF("Status.LocalServiceApiUnavailable", actionLabel, ServiceEndpoint.DefaultUrl, ex.Message), "error");
+            DependenciesText.Text = BuildOfflineMessage(ex) + Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+            ClearComPairsList();
+        }
         catch (Exception ex)
         {
             SetStatus(TF("Status.ActionFailed", actionLabel, ex.Message));
@@ -1111,10 +1134,16 @@ public partial class MainWindow : Window
     private async Task<bool> SaveMappingsAsync(bool logSuccess)
     {
         _savingMappings = true;
+        UpdateMappingCommandState();
         try
         {
             CommitGridEdits();
             NormalizeRowsBeforeSave();
+            if (!await EnsureServiceReadyForWriteAsync(T("Action.Save")))
+            {
+                return false;
+            }
+
             var mappings = _mappings.Select(r => r.ToMapping()).ToList();
             var response = await _client.PutAsJsonAsync("/api/mappings", mappings, JsonOptions);
             var body = await response.Content.ReadAsStringAsync();
@@ -1130,10 +1159,72 @@ public partial class MainWindow : Window
             SetStatus(TF("Status.SaveFailed", body));
             return false;
         }
+        catch (Exception ex) when (IsLocalServiceApiException(ex))
+        {
+            SetStatus(TF("Status.LocalServiceApiUnavailable", T("Action.Save"), ServiceEndpoint.DefaultUrl, ex.Message), "error");
+            DependenciesText.Text = BuildOfflineMessage(ex) + Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+            ClearComPairsList();
+            return false;
+        }
         finally
         {
             _savingMappings = false;
+            UpdateMappingCommandState();
         }
+    }
+
+    private async Task<bool> EnsureServiceReadyForWriteAsync(string actionLabel)
+    {
+        if (await IsServiceReadyAsync())
+        {
+            return true;
+        }
+
+        ServiceStateText.Text = T("Status.ServiceStarting");
+        if (await TryStartInstalledWindowsServiceAsync())
+        {
+            return true;
+        }
+
+        var servicePath = ResolveServicePath();
+        if (servicePath is null)
+        {
+            ServiceStateText.Text = T("Status.ServiceOffline");
+            ClearComPairsList();
+            DependenciesText.Text = T("Diag.ServiceNotFound");
+            DependenciesText.Text += Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+            return false;
+        }
+
+        try
+        {
+            using var _ = Process.Start(new ProcessStartInfo
+            {
+                FileName = servicePath,
+                ArgumentList = { "--console" },
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(servicePath)!
+            });
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.LocalServiceApiUnavailable", actionLabel, ServiceEndpoint.DefaultUrl, ex.Message), "error");
+            DependenciesText.Text = BuildOfflineMessage(ex) + Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+            ClearComPairsList();
+            return false;
+        }
+
+        if (await WaitForServiceAsync(TimeSpan.FromSeconds(10)))
+        {
+            return true;
+        }
+
+        ServiceStateText.Text = T("Status.ServiceOffline");
+        ClearComPairsList();
+        DependenciesText.Text = TF("Diag.StartedButNotReady", servicePath);
+        DependenciesText.Text += Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+        return false;
     }
 
     private void ScheduleAutoSave()
@@ -1155,7 +1246,7 @@ public partial class MainWindow : Window
         try
         {
             await Task.Delay(TimeSpan.FromMilliseconds(800), cancellationToken);
-            if (cancellationToken.IsCancellationRequested || !await IsServiceReadyAsync())
+            if (cancellationToken.IsCancellationRequested)
             {
                 return;
             }
@@ -1931,9 +2022,16 @@ public partial class MainWindow : Window
 
     private async Task SetupDependenciesAsync()
     {
+        if (_dependencySetupActive)
+        {
+            return;
+        }
+
         try
         {
+            SetDependencySetupActive(true);
             ServiceStateText.Text = T("Status.ServiceChecking");
+            SetStatus(T("Status.DependencySetupRunning"));
             var localReport = new DependencyDetector().Detect();
             DependenciesText.Text = FormatDependencies(localReport);
             if (localReport.IsReadyForCom0comHub4com)
@@ -1994,6 +2092,13 @@ public partial class MainWindow : Window
         {
             SetStatus(TF("Status.DependencySetupFailed", ex.Message));
         }
+        finally
+        {
+            if (!_dependencyPollActive)
+            {
+                SetDependencySetupActive(false);
+            }
+        }
     }
 
     private void LaunchCom0comInstaller()
@@ -2033,6 +2138,7 @@ public partial class MainWindow : Window
         }
 
         _dependencyPollActive = true;
+        SetDependencySetupActive(true);
         try
         {
             var deadline = DateTimeOffset.UtcNow.AddMinutes(3);
@@ -2068,7 +2174,17 @@ public partial class MainWindow : Window
         finally
         {
             _dependencyPollActive = false;
+            SetDependencySetupActive(false);
         }
+    }
+
+    private void SetDependencySetupActive(bool active)
+    {
+        _dependencySetupActive = active;
+        DependencyProgressPanel.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        DependencyProgressBar.IsIndeterminate = active;
+        DependencyProgressText.Text = active ? T("Status.DependencySetupRunning") : "";
+        UpdateMappingCommandState();
     }
 
     private async Task RefreshLogsAsync()
