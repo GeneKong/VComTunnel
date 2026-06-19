@@ -31,6 +31,11 @@ public sealed class Com0comSetupManager
             throw new InvalidOperationException("backingPort is required for com0com pair creation.");
         }
 
+        if (_comPortInventory.GetCom0comPairs().Any(pair => PairMatchesMapping(pair, mapping)))
+        {
+            throw new InvalidOperationException($"com0com pair {mapping.VisiblePort} <-> {mapping.BackingPort} already exists.");
+        }
+
         return BuildPlan(
             $"install PortName={mapping.VisiblePort} PortName={mapping.BackingPort}",
             $"Create com0com pair {mapping.VisiblePort} <-> {mapping.BackingPort}");
@@ -64,5 +69,18 @@ public sealed class Com0comSetupManager
             arguments,
             RequiresElevation: true,
             description);
+    }
+
+    private static bool PairMatchesMapping(Com0comPairInfo pair, TunnelMapping mapping)
+    {
+        return PairHasPort(pair, mapping.VisiblePort)
+            && PairHasPort(pair, mapping.BackingPort);
+    }
+
+    private static bool PairHasPort(Com0comPairInfo pair, string? port)
+    {
+        return !string.IsNullOrWhiteSpace(port)
+            && (string.Equals(pair.PortA, port, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(pair.PortB, port, StringComparison.OrdinalIgnoreCase));
     }
 }

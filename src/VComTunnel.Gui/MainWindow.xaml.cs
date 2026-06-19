@@ -359,7 +359,7 @@ public partial class MainWindow : Window
 
     private void Add_Click(object sender, RoutedEventArgs e)
     {
-        var portNumber = 12 + _mappings.Count;
+        var portNumber = NextDefaultComPortNumber();
         var row = new MappingRow
         {
             Id = Guid.NewGuid().ToString("n"),
@@ -1327,6 +1327,13 @@ public partial class MainWindow : Window
                 return;
             }
 
+            var existingPairs = await RefreshComPairsListAsync(updateDetails: true);
+            if (existingPairs.Any(pair => PairMatchesMapping(pair, row)))
+            {
+                SetStatus(TF("Status.Com0comPairAlreadyExists", row.VisiblePort, row.BackingPort), "warn");
+                return;
+            }
+
             var answer = MessageBox.Show(
                 TF("Prompt.CreatePair", row.VisiblePort, row.BackingPort),
                 T("Title.ComPair"),
@@ -2065,6 +2072,31 @@ public partial class MainWindow : Window
         MappingsGrid.Items.Refresh();
     }
 
+    private int NextDefaultComPortNumber()
+    {
+        var used = new HashSet<int>();
+        foreach (var row in _mappings)
+        {
+            AddPortNumber(used, row.VisiblePort);
+            AddPortNumber(used, row.BackingPort);
+        }
+
+        foreach (var port in new WindowsComPortInventory().GetRegisteredPortNames())
+        {
+            AddPortNumber(used, port);
+        }
+
+        for (var portNumber = 12; portNumber < 256; portNumber++)
+        {
+            if (!used.Contains(portNumber))
+            {
+                return portNumber;
+            }
+        }
+
+        return 12 + _mappings.Count;
+    }
+
     private static bool TryGetComPortNumber(string? port, out int portNumber)
     {
         portNumber = 0;
@@ -2072,6 +2104,14 @@ public partial class MainWindow : Window
             && port.StartsWith("COM", StringComparison.OrdinalIgnoreCase)
             && int.TryParse(port[3..], out portNumber)
             && portNumber > 0;
+    }
+
+    private static void AddPortNumber(ISet<int> ports, string? port)
+    {
+        if (TryGetComPortNumber(port, out var portNumber))
+        {
+            ports.Add(portNumber);
+        }
     }
 
     private async Task<bool> IsServiceDependencyStateStaleAsync()

@@ -1098,7 +1098,7 @@ static async Task Com0comCreateAndRemovePlansAsync()
     var manager = new Com0comSetupManager(
         store,
         detector,
-        new FakeComPortInventory(["COM29", "CNCB29"], [new Com0comPairInfo(2, "COM29", "CNCB29", @"\Device\com0com12", @"\Device\com0com22", true)]));
+        new FakeComPortInventory(["COM28", "CNCB28"], [new Com0comPairInfo(2, "COM28", "CNCB28", @"\Device\com0com12", @"\Device\com0com22", true)]));
 
     var create = await manager.BuildCreatePlanAsync("hub");
     AssertStringContains(create.Arguments, "install PortName=COM29 PortName=CNCB29");
@@ -1110,6 +1110,20 @@ static async Task Com0comCreateAndRemovePlansAsync()
     var remove = manager.BuildRemovePlan(2);
     AssertStringContains(remove.Arguments, "remove 2");
     AssertEqual(1.ToString(), manager.GetPairs().Count.ToString());
+
+    var existingManager = new Com0comSetupManager(
+        store,
+        detector,
+        new FakeComPortInventory(["COM29", "CNCB29"], [new Com0comPairInfo(3, "COM29", "CNCB29", @"\Device\com0com13", @"\Device\com0com23", true)]));
+    try
+    {
+        await existingManager.BuildCreatePlanAsync("hub");
+        throw new Exception("Existing com0com pair should not produce a create plan.");
+    }
+    catch (InvalidOperationException ex)
+    {
+        AssertStringContains(ex.Message, "already exists");
+    }
 }
 
 static async Task FakeCom2TcpProcessStartsAndStopsAsync()
