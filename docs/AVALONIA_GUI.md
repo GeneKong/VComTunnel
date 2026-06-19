@@ -55,6 +55,18 @@ If the script reports that `dotnet` is missing, install the .NET 8 SDK inside
 the WSL distribution and rerun it. The script intentionally fails early instead
 of trying to install system packages.
 
+To validate a Linux binary without installing the .NET SDK inside WSL, publish a
+self-contained `linux-x64` GUI build on Windows and run its smoke entrypoint in
+WSL:
+
+```powershell
+scripts\smoke-avalonia-linux-wsl.ps1
+```
+
+The smoke entrypoint does not open a window. It verifies that the Linux binary
+loads, reads the Avalonia GUI settings path, and validates the configured
+VComTunnel service URL.
+
 Running the WSL GUI against the Windows service depends on WSL networking. The
 service is intentionally loopback-only today; do not expose it on a LAN address
 until authentication and threat model work is done.
@@ -77,4 +89,5 @@ dotnet run --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj --no-restore
 dotnet publish src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj -c Debug -r linux-x64 --self-contained false
 dotnet publish src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj -c Debug -r osx-x64 --self-contained false
 dotnet publish src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj -c Debug -r osx-arm64 --self-contained false
+scripts\smoke-avalonia-linux-wsl.ps1
 ```

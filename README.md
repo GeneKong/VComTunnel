@@ -76,6 +76,7 @@ dotnet run --project src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj
 dotnet publish src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj -c Debug -r linux-x64 --self-contained false
 dotnet publish src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj -c Debug -r osx-arm64 --self-contained false
 scripts\build-avalonia-linux-wsl.ps1
+scripts\smoke-avalonia-linux-wsl.ps1
 ```
 
 See [docs/AVALONIA_GUI.md](docs/AVALONIA_GUI.md) for the current
