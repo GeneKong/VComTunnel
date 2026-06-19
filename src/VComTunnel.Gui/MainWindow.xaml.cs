@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -28,6 +29,7 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<MappingRow> _mappings = [];
     private readonly ObservableCollection<ComPairRow> _comPairs = [];
     private readonly List<string> _guiLogLines = [];
+    private readonly HashSet<string> _autoStartPromptRows = new(StringComparer.OrdinalIgnoreCase);
     private bool _serviceStartAttempted;
     private bool _dependencyPollActive;
     private bool _serviceRestarting;
@@ -42,6 +44,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _mappings.CollectionChanged += Mappings_CollectionChanged;
         MappingsGrid.ItemsSource = _mappings;
         ComPairsList.ItemsSource = _comPairs;
         ApplyLocalization();
@@ -297,6 +300,35 @@ public partial class MainWindow : Window
 
     private void MappingsGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e) => ScheduleAutoSave();
 
+    private void Mappings_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.OldItems is not null)
+        {
+            foreach (MappingRow row in e.OldItems)
+            {
+                row.AutoStartEnabledRequested -= MappingRow_AutoStartEnabledRequested;
+            }
+        }
+
+        if (e.NewItems is not null)
+        {
+            foreach (MappingRow row in e.NewItems)
+            {
+                row.AutoStartEnabledRequested += MappingRow_AutoStartEnabledRequested;
+            }
+        }
+    }
+
+    private async void MappingRow_AutoStartEnabledRequested(object? sender, EventArgs e)
+    {
+        if (sender is not MappingRow row || _suppressAutoSave)
+        {
+            return;
+        }
+
+        await HandleAutoStartEnabledAsync(row);
+    }
+
     private void MappingsGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is not DataGrid grid || e.OriginalSource is not DependencyObject source)
@@ -522,17 +554,22 @@ public partial class MainWindow : Window
             return;
         }
 
+        await InstallServiceCoreAsync();
+    }
+
+    private async Task<bool> InstallServiceCoreAsync()
+    {
         var servicePath = ResolveServicePath();
         if (servicePath is null)
         {
             SetStatus(T("Diag.ServiceNotFound"), "error");
-            return;
+            return false;
         }
 
         SetStatus(T("Status.ServiceInstalling"));
         if (!await RunServiceCtlElevatedAsync("install", [servicePath]))
         {
-            return;
+            return false;
         }
 
         StopLocalServiceProcesses();
@@ -544,11 +581,153 @@ public partial class MainWindow : Window
             {
                 await RefreshAsync();
                 SetStatus(T("Status.ServiceInstalled"));
-                return;
+                return true;
             }
         }
 
         SetStatus(T("Status.ServiceInstalled"));
+        return true;
+    }
+
+    private async Task HandleAutoStartEnabledAsync(MappingRow row)
+    {
+        if (!row.AutoStart || !_autoStartPromptRows.Add(row.Id))
+        {
+            return;
+        }
+
+        CancelPendingAutoSave();
+        try
+        {
+            var state = await GetInstalledWindowsServiceStateAsync();
+            if (state == InstalledWindowsServiceState.Running)
+            {
+                ScheduleAutoSave();
+                return;
+            }
+
+            if (state == InstalledWindowsServiceState.NotInstalled)
+            {
+                await HandleAutoStartWithoutInstalledServiceAsync(row);
+                return;
+            }
+
+            await HandleAutoStartWithStoppedServiceAsync(row);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.AutoStartServiceCheckFailed", ex.Message), "warn");
+            ScheduleAutoSave();
+        }
+        finally
+        {
+            _autoStartPromptRows.Remove(row.Id);
+        }
+    }
+
+    private async Task HandleAutoStartWithoutInstalledServiceAsync(MappingRow row)
+    {
+        var answer = MessageBox.Show(
+            T("Prompt.AutoStartInstallService"),
+            T("Title.AutoStart"),
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Question);
+
+        if (answer == MessageBoxResult.Cancel)
+        {
+            RevertAutoStart(row);
+            return;
+        }
+
+        if (answer == MessageBoxResult.No)
+        {
+            if (await SaveMappingsAsync(logSuccess: false))
+            {
+                SetStatus(T("Status.AutoStartSavedNeedsService"), "warn");
+            }
+            return;
+        }
+
+        if (!await SaveMappingsAsync(logSuccess: false))
+        {
+            return;
+        }
+
+        if (await InstallServiceCoreAsync())
+        {
+            SetStatus(T("Status.AutoStartServiceReady"));
+        }
+    }
+
+    private async Task HandleAutoStartWithStoppedServiceAsync(MappingRow row)
+    {
+        var answer = MessageBox.Show(
+            T("Prompt.AutoStartStartService"),
+            T("Title.AutoStart"),
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Question);
+
+        if (answer == MessageBoxResult.Cancel)
+        {
+            RevertAutoStart(row);
+            return;
+        }
+
+        if (answer == MessageBoxResult.No)
+        {
+            if (await SaveMappingsAsync(logSuccess: false))
+            {
+                SetStatus(T("Status.AutoStartSavedServiceStopped"), "warn");
+            }
+            return;
+        }
+
+        if (!await SaveMappingsAsync(logSuccess: false))
+        {
+            return;
+        }
+
+        StopLocalServiceProcesses();
+        await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(8));
+        if (await StartInstalledWindowsServiceElevatedAsync())
+        {
+            SetStatus(T("Status.AutoStartServiceReady"));
+        }
+    }
+
+    private void RevertAutoStart(MappingRow row)
+    {
+        _suppressAutoSave = true;
+        try
+        {
+            row.AutoStart = false;
+        }
+        finally
+        {
+            _suppressAutoSave = false;
+        }
+
+        MappingsGrid.Items.Refresh();
+        SetStatus(TF("Status.AutoStartCanceled", row.Name), "warn");
+    }
+
+    private async Task<bool> StartInstalledWindowsServiceElevatedAsync()
+    {
+        SetStatus(T("Status.WindowsServiceStarting"));
+        if (!await RunServiceCtlElevatedAsync("start", []))
+        {
+            return false;
+        }
+
+        if (await WaitForServiceAsync(TimeSpan.FromSeconds(12)))
+        {
+            await RefreshAsync();
+            SetStatus(T("Status.BackgroundServiceReady"));
+            return true;
+        }
+
+        SetStatus(T("Status.ServiceStartFailed"), "warn");
+        return false;
     }
 
     private async Task UninstallServiceAsync()
@@ -713,6 +892,33 @@ public partial class MainWindow : Window
             SetStatus(TF("Status.ServiceControlFailed", action, ex.Message), "error");
             return false;
         }
+    }
+
+    private async Task<InstalledWindowsServiceState> GetInstalledWindowsServiceStateAsync()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return InstalledWindowsServiceState.NotInstalled;
+        }
+
+        var query = await RunProcessAsync("sc.exe", ["query", "VComTunnel"]);
+        if (query.ExitCode != 0)
+        {
+            return InstalledWindowsServiceState.NotInstalled;
+        }
+
+        var text = $"{query.Output} {query.Error}";
+        if (text.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
+        {
+            return InstalledWindowsServiceState.Running;
+        }
+
+        if (text.Contains("STOPPED", StringComparison.OrdinalIgnoreCase))
+        {
+            return InstalledWindowsServiceState.Stopped;
+        }
+
+        return InstalledWindowsServiceState.Installed;
     }
 
     private async Task<bool> TryStartInstalledWindowsServiceAsync()
@@ -1252,6 +1458,13 @@ public partial class MainWindow : Window
         _autoSaveCts = new CancellationTokenSource();
         var token = _autoSaveCts.Token;
         _ = AutoSaveAfterDelayAsync(token);
+    }
+
+    private void CancelPendingAutoSave()
+    {
+        _autoSaveCts?.Cancel();
+        _autoSaveCts?.Dispose();
+        _autoSaveCts = null;
     }
 
     private async Task AutoSaveAfterDelayAsync(CancellationToken cancellationToken)
@@ -2547,10 +2760,12 @@ public sealed class MappingRow : INotifyPropertyChanged
 {
     private string _backend = "com0comHub4com";
     private string? _backingPort;
+    private bool _autoStart;
     private TunnelRunState _runState = TunnelRunState.Stopped;
     private string _stateLabel = "";
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    public event EventHandler? AutoStartEnabledRequested;
 
     public string Id { get; set; } = Guid.NewGuid().ToString("n");
     public string Name { get; set; } = "";
@@ -2595,7 +2810,25 @@ public sealed class MappingRow : INotifyPropertyChanged
 
     public string Host { get; set; } = "";
     public int Port { get; set; }
-    public bool AutoStart { get; set; }
+    public bool AutoStart
+    {
+        get => _autoStart;
+        set
+        {
+            if (_autoStart == value)
+            {
+                return;
+            }
+
+            var enabled = !_autoStart && value;
+            _autoStart = value;
+            OnPropertyChanged(nameof(AutoStart));
+            if (enabled)
+            {
+                AutoStartEnabledRequested?.Invoke(this, EventArgs.Empty);
+            }
+        }
+    }
     public bool RestartOnFailure { get; set; } = true;
 
     public TunnelRunState RunState
@@ -2703,6 +2936,14 @@ internal sealed record KmdfCtlResult(bool Success, string Message);
 internal sealed record KmdfWaitResult(bool Success, string? FailureMessage);
 
 internal sealed record ProcessRunResult(int ExitCode, string Output, string Error);
+
+internal enum InstalledWindowsServiceState
+{
+    NotInstalled,
+    Installed,
+    Stopped,
+    Running
+}
 
 internal sealed record MappingPortTarget(Com0comPairInfo? Com0comPair, KmdfDeviceInfo? KmdfDevice, string Description)
 {
