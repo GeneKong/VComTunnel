@@ -56,7 +56,7 @@ public sealed class DependencyDetector
 
         foreach (var root in _candidateRoots.Where(Directory.Exists))
         {
-            var found = Directory.EnumerateFiles(root, name, SearchOption.AllDirectories).FirstOrDefault();
+            var found = TryFindUnderRoot(root, name);
             if (found is not null)
             {
                 return found;
@@ -64,6 +64,24 @@ public sealed class DependencyDetector
         }
 
         return null;
+    }
+
+    private static string? TryFindUnderRoot(string root, string name)
+    {
+        try
+        {
+            var direct = Path.Combine(root, name);
+            if (File.Exists(direct))
+            {
+                return direct;
+            }
+
+            return Directory.EnumerateFiles(root, name, SearchOption.AllDirectories).FirstOrDefault();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or DirectoryNotFoundException)
+        {
+            return null;
+        }
     }
 
     private string? FindOnPath(string name)
