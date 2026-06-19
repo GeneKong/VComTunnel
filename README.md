@@ -1,5 +1,7 @@
 # VComTunnel
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 VComTunnel is a Windows virtual COM to RFC2217 bridge manager. It lets
 existing serial tools open a local COM port while a local service forwards data
 and serial-control changes to a remote RFC2217 endpoint.
@@ -7,18 +9,6 @@ and serial-control changes to a remote RFC2217 endpoint.
 The project is aimed at embedded development, remote device access, firmware
 flashing, serial logging, and lab workflows where existing Windows tools still
 expect a normal `COMx` device.
-
-## 中文简介
-
-VComTunnel 是一个面向 Windows 的虚拟串口到 RFC2217 桥接管理工具。它让
-串口终端、烧录工具、调试工具等现有 Windows 程序继续打开本地 `COMx`
-端口，同时由本机后台服务把串口数据、波特率、DTR/RTS、BREAK 等控制信号
-转发到远端 RFC2217 设备。
-
-当前推荐的稳定路径是 `com0comHub4com`：通过 com0com 提供 Windows 可见
-虚拟串口对，再通过 hub4com/com2tcp-rfc2217 连接 RFC2217 目标。项目也
-提供 `com0comService` 过渡后端和实验性的 KMDF 原生虚拟串口后端；KMDF
-后端仍属于验证阶段，不建议作为生产驱动直接分发。
 
 ## Highlights
 
@@ -184,7 +174,7 @@ archives under the release `dependencies` directory:
 - `dependencies\hub4com-2.1.0.0-386.zip`
 - `dependencies\com0com-3.0.0.0-i386-and-x64-signed.zip`
 
-Official dependency download links / 第三方依赖下载地址：
+Official dependency download links:
 
 - hub4com 2.1.0.0:
   <https://sourceforge.net/projects/com0com/files/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip/download>
@@ -192,10 +182,6 @@ Official dependency download links / 第三方依赖下载地址：
   <https://sourceforge.net/projects/com0com/files/com0com/3.0.0.0/com0com-3.0.0.0-i386-and-x64-signed.zip/download>
 - com0com project files index:
   <https://sourceforge.net/projects/com0com/files/>
-
-中文说明：`hub4com` 解压后即可由 VComTunnel 扫描并调用；`com0com` 是
-Windows 虚拟串口驱动，仍需要用户在管理员权限下进行交互式安装。VComTunnel
-可以帮助下载、解压和启动安装程序，但不会绕过 Windows 的驱动安装和签名策略。
 
 When you run dependency setup, VComTunnel first uses those bundled archives. If
 they are missing, development builds fall back to downloading the same archives.
