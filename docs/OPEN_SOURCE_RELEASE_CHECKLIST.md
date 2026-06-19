@@ -25,9 +25,10 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
 
 ## Build Validation
 
-- Run `dotnet build VComTunnel.sln`.
-- Run `dotnet run --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj`.
-- Run `scripts\smoke-local.ps1`.
+- Run `dotnet restore VComTunnel.sln`.
+- Run `dotnet build -c Release --no-restore VComTunnel.sln`.
+- Run `dotnet run -c Release --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj`.
+- Run `scripts\smoke-local.ps1 -Configuration Release -NoBuild`.
 - Run the fake-server RFC2217 probe.
 - For release packaging, run `scripts\package-release.ps1` with a reviewed
   dependency archive cache when repeatability matters.

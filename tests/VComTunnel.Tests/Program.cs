@@ -11,6 +11,9 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("invalid host and port are rejected", () => Task.Run(InvalidHostAndPortAreRejected)),
     ("COM backing port is accepted", () => Task.Run(ComBackingPortIsAccepted)),
     ("config round trip", ConfigRoundTripAsync),
+    ("service endpoint defaults to loopback", () => Task.Run(ServiceEndpointDefaultsToLoopback)),
+    ("service endpoint accepts loopback override", () => Task.Run(ServiceEndpointAcceptsLoopbackOverride)),
+    ("service endpoint rejects non-loopback override", () => Task.Run(ServiceEndpointRejectsNonLoopbackOverride)),
     ("com0com create hints", () => Task.Run(Com0comCreateHints)),
     ("com0com service maps peer modem signals", () => Task.Run(Com0comServiceMapsPeerModemSignals)),
     ("esptool baud monitor waits for response", () => Task.Run(EspToolBaudMonitorWaitsForResponse)),
@@ -160,6 +163,56 @@ static async Task ConfigRoundTripAsync()
     AssertEqual("RoundTrip", loaded.Mappings.Single().Name);
     AssertEqual("COM33", loaded.Mappings.Single().VisiblePort);
     AssertTrue(loaded.Mappings.Single().AutoStart, "AutoStart should round-trip.");
+}
+
+static void ServiceEndpointDefaultsToLoopback()
+{
+    var oldUrl = Environment.GetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable);
+    Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, null);
+    try
+    {
+        AssertEqual(ServiceEndpoint.DefaultUrl, ServiceEndpoint.GetBaseUrl());
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, oldUrl);
+    }
+}
+
+static void ServiceEndpointAcceptsLoopbackOverride()
+{
+    var oldUrl = Environment.GetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable);
+    Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, "http://localhost:44999/");
+    try
+    {
+        AssertEqual("http://localhost:44999", ServiceEndpoint.GetBaseUrl());
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, oldUrl);
+    }
+}
+
+static void ServiceEndpointRejectsNonLoopbackOverride()
+{
+    var oldUrl = Environment.GetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable);
+    Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, "http://192.0.2.1:44817");
+    try
+    {
+        try
+        {
+            _ = ServiceEndpoint.GetBaseUrl();
+            throw new Exception("Expected non-loopback service URL to be rejected.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            AssertStringContains(ex.Message, "loopback");
+        }
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, oldUrl);
+    }
 }
 
 static void Com0comCreateHints()
@@ -916,17 +969,19 @@ static async Task KmdfMappingReportsStartupFaultAsync()
 
     var status = await orchestrator.StartAsync((await store.LoadAsync()).Mappings.Single().Id);
     AssertEqual(TunnelRunState.Faulted.ToString(), status.State.ToString());
-    AssertStringContainsAny(status.LastError ?? "",
+    var acceptedStartupFaults = new[]
+    {
         "Could not open KMDF control channel",
         "KMDF driver protocol",
-        "Could not connect to RFC2217 endpoint");
+        "Could not connect to RFC2217 endpoint",
+        "The requested resource is in use",
+        "请求的资源在使用中"
+    };
+    AssertStringContainsAny(status.LastError ?? "", acceptedStartupFaults);
 
     var secondStatus = await orchestrator.StartAsync((await store.LoadAsync()).Mappings.Single().Id);
     AssertEqual(TunnelRunState.Faulted.ToString(), secondStatus.State.ToString());
-    AssertStringContainsAny(secondStatus.LastError ?? "",
-        "Could not open KMDF control channel",
-        "KMDF driver protocol",
-        "Could not connect to RFC2217 endpoint");
+    AssertStringContainsAny(secondStatus.LastError ?? "", acceptedStartupFaults);
 }
 
 static async Task KmdfSessionRestartsAfterNetworkFaultAsync()

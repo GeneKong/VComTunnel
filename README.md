@@ -63,10 +63,14 @@ running tunnels; stop mappings from the GUI or with `vcomtunnelctl stop`.
 ## Build
 
 ```powershell
-dotnet build VComTunnel.sln
-dotnet run --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
-scripts\smoke-local.ps1
+dotnet restore VComTunnel.sln
+dotnet build -c Release --no-restore VComTunnel.sln
+dotnet run -c Release --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
+scripts\smoke-local.ps1 -Configuration Release -NoBuild
 ```
+
+The smoke script runs the service on a temporary loopback port with a temporary
+`VCOMTUNNEL_HOME`, so it does not modify an installed local service.
 
 The KMDF smoke tool can exercise a test-installed `VComTunnel.Serial` port
 against a local fake RFC2217 echo server:

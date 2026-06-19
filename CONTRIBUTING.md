@@ -25,10 +25,15 @@ Optional, depending on the backend you are working on:
 Run the managed build and tests before sending changes:
 
 ```powershell
-dotnet build VComTunnel.sln
-dotnet run --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
-scripts\smoke-local.ps1
+dotnet restore VComTunnel.sln
+dotnet build -c Release --no-restore VComTunnel.sln
+dotnet run -c Release --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
+scripts\smoke-local.ps1 -Configuration Release -NoBuild
 ```
+
+The smoke script starts its own console-mode service on a temporary loopback
+port and uses a temporary `VCOMTUNNEL_HOME`, so it does not require stopping an
+installed VComTunnel service first.
 
 For RFC2217 protocol work, prefer the fake server probe before touching real
 hardware:

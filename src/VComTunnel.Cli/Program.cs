@@ -7,7 +7,6 @@ return exitCode;
 internal static class VComTunnelCtl
 {
     private const string ServiceName = "VComTunnel";
-    private const string ServiceBaseUrl = "http://127.0.0.1:44817";
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -112,17 +111,24 @@ internal static class VComTunnelCtl
 
     private static async Task<int> GetAsync(string path)
     {
-        using var client = new HttpClient { BaseAddress = new Uri(ServiceBaseUrl) };
-        try
+        if (!TryCreateServiceClient(out var client, out var serviceBaseUrl))
         {
-            var response = await client.GetAsync(path);
-            Console.WriteLine(await response.Content.ReadAsStringAsync());
-            return response.IsSuccessStatusCode ? 0 : 2;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Service is not reachable at {ServiceBaseUrl}: {ex.Message}");
             return 2;
+        }
+
+        using (client)
+        {
+            try
+            {
+                var response = await client.GetAsync(path);
+                Console.WriteLine(await response.Content.ReadAsStringAsync());
+                return response.IsSuccessStatusCode ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Service is not reachable at {serviceBaseUrl}: {ex.Message}");
+                return 2;
+            }
         }
     }
 
@@ -134,17 +140,24 @@ internal static class VComTunnelCtl
             return 2;
         }
 
-        using var client = new HttpClient { BaseAddress = new Uri(ServiceBaseUrl) };
-        try
+        if (!TryCreateServiceClient(out var client, out var serviceBaseUrl))
         {
-            var response = await client.PostAsync($"/api/mappings/{id}/{action}", null);
-            Console.WriteLine(await response.Content.ReadAsStringAsync());
-            return response.IsSuccessStatusCode ? 0 : 2;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Service is not reachable at {ServiceBaseUrl}: {ex.Message}");
             return 2;
+        }
+
+        using (client)
+        {
+            try
+            {
+                var response = await client.PostAsync($"/api/mappings/{id}/{action}", null);
+                Console.WriteLine(await response.Content.ReadAsStringAsync());
+                return response.IsSuccessStatusCode ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Service is not reachable at {serviceBaseUrl}: {ex.Message}");
+                return 2;
+            }
         }
     }
 
@@ -161,17 +174,41 @@ internal static class VComTunnelCtl
 
     private static async Task<int> PairPlanAsync(string path)
     {
-        using var client = new HttpClient { BaseAddress = new Uri(ServiceBaseUrl) };
+        if (!TryCreateServiceClient(out var client, out var serviceBaseUrl))
+        {
+            return 2;
+        }
+
+        using (client)
+        {
+            try
+            {
+                var response = await client.PostAsync(path, null);
+                Console.WriteLine(await response.Content.ReadAsStringAsync());
+                return response.IsSuccessStatusCode ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Service is not reachable at {serviceBaseUrl}: {ex.Message}");
+                return 2;
+            }
+        }
+    }
+
+    private static bool TryCreateServiceClient(out HttpClient client, out string serviceBaseUrl)
+    {
         try
         {
-            var response = await client.PostAsync(path, null);
-            Console.WriteLine(await response.Content.ReadAsStringAsync());
-            return response.IsSuccessStatusCode ? 0 : 2;
+            serviceBaseUrl = ServiceEndpoint.GetBaseUrl();
+            client = new HttpClient { BaseAddress = new Uri(serviceBaseUrl) };
+            return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is InvalidOperationException or UriFormatException)
         {
-            Console.WriteLine($"Service is not reachable at {ServiceBaseUrl}: {ex.Message}");
-            return 2;
+            serviceBaseUrl = "";
+            client = null!;
+            Console.WriteLine(ex.Message);
+            return false;
         }
     }
 
