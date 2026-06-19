@@ -60,7 +60,23 @@ serial tool -> COMx -> VComTunnel.Serial.sys -> VComTunnel.Service -> RFC2217
 The GUI is a controller for the local service. Closing the GUI does not stop
 running tunnels; stop mappings from the GUI or with `vcomtunnelctl stop`.
 
-## Build
+## Verified Windows GUI State
+
+![VComTunnel Windows GUI running one com0comHub4com tunnel](docs/images/vcomtunnel-gui-runtime.png)
+
+The captured Windows run shows the stable `com0comHub4com` backend in service:
+the local service is connected, one mapping is running, and no mapping fault is
+reported. The active mapping uses `COM12` as the visible port and `CNCB12` as
+the com0com backing port. The diagnostics panel reports `com0com/hub4com ready:
+True`, `KMDF install tool ready: True`, and resolved paths for `setupc.exe`,
+`hub4com.exe`, and `com2tcp-rfc2217.bat`. The log panel shows RFC2217 traffic
+for `Tunnel 1`.
+
+## Verified Windows Build
+
+The following sequence is the verified local build gate. `dotnet restore`
+requires NuGet access; the later `--no-restore` commands assume that restore
+has completed successfully.
 
 ```powershell
 dotnet restore VComTunnel.sln
@@ -72,8 +88,11 @@ scripts\smoke-local.ps1 -Configuration Release -NoBuild
 The smoke script runs the service on a temporary loopback port with a temporary
 `VCOMTUNNEL_HOME`, so it does not modify an installed local service.
 
-The KMDF smoke tool can exercise a test-installed `VComTunnel.Serial` port
-against a local fake RFC2217 echo server:
+The following validation commands are hardware- or endpoint-dependent and are
+not part of the default build gate. Use them only when the corresponding driver,
+COM port, or RFC2217 endpoint is available. The KMDF smoke tool can exercise a
+test-installed `VComTunnel.Serial` port against a local fake RFC2217 echo
+server:
 
 ```powershell
 dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -- COM27
@@ -222,12 +241,12 @@ The GUI has a single `Setup deps` button. It checks local dependency state, extr
 
 ## Release packaging
 
-Use the packaging script to publish GUI, service, CLI, launch scripts, release
-notes, and bundled dependency archives into one distributable portable folder
-and `.zip`:
+Use the verified Windows portable packaging command to publish GUI, service,
+CLI, launch scripts, release notes, and bundled dependency archives into one
+distributable folder and `.zip`:
 
 ```powershell
-scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
 ```
 
 The default package is self-contained and is intended for direct user download:
@@ -237,23 +256,21 @@ the release folder's `data` directory. The GUI will start the local
 `VComTunnel.Service.exe --console` helper when a Windows service is not
 installed.
 
-The script defaults to `--no-restore`; run a normal runtime restore/build first,
-or pass `-Restore` when the release machine is allowed to access NuGet. For a
-smaller package that requires installed .NET runtimes on the target machine,
-pass `-FrameworkDependent`:
+Do not omit `-Restore` unless a runtime-specific restore for the requested RID
+has already been completed. A normal solution restore is not sufficient for the
+`win-x64` publish assets used by this release script. For a smaller package
+that requires installed .NET runtimes on the target machine, pass
+`-FrameworkDependent` together with the same restore policy:
 
 ```powershell
-scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -FrameworkDependent
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore -FrameworkDependent
 ```
 
 By default the script copies the pinned archives from
 `third_party\dependencies` into the package `dependencies` directory. If you
 need to build with a separately reviewed cache, provide a pre-populated archive
-directory with the same file names and SHA256 values:
-
-```powershell
-scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
-```
+directory with the same file names and SHA256 values through
+`-DependencyArchiveRoot`.
 
 The package also includes:
 
@@ -263,6 +280,7 @@ The package also includes:
 - `Setup-Dependencies-Portable.cmd`
 - `Install-Windows-Service.cmd` and `Uninstall-Windows-Service.cmd`
 - `LICENSE`, `README.md`, `README.zh-CN.md`, and `SECURITY.md`
+- bundled `dependencies` archives for com0com and hub4com
 - `THIRD-PARTY-NOTICES.txt`
 - `SHA256SUMS.txt`
 
@@ -270,52 +288,42 @@ The included com0com driver package still requires an interactive elevated
 install step on the target machine; bundling it removes the runtime network
 dependency, but does not bypass Windows driver installation policy.
 
-For installer-style distribution, use the Velopack packaging script:
+For installer-style distribution, use the verified Windows Velopack packaging
+command:
 
 ```powershell
-dotnet tool restore
-scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore -Msi
 ```
 
 Velopack is the preferred installer/update tool because the same packaging
 model can cover Windows, macOS, and Linux after the cross-platform Avalonia GUI
 becomes the primary UI. With the current WPF GUI, only Windows packaging is
-available. On Windows the script produces a Velopack `Setup.exe` and update
-assets; pass `-Msi` to also generate an MSI:
-
-```powershell
-scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Msi
-```
+available. On Windows the command above produces a Velopack `Setup.exe`, an
+MSI, a Velopack portable zip, the staged portable zip, and a SHA-256 manifest.
 
 Public download files are copied to `artifacts\velopack\public\<runtime>` with
 the release version in every file name, for example
 `VComTunnel-1.0.0.rc2-win-x64-Setup.exe`. Velopack's raw update-feed files stay
 under the runtime output directory and keep Velopack's expected names.
 
-For future non-Windows GUI builds, publish the cross-platform app first and pass
-its output directory to the same script:
-
-```powershell
-scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
-scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
-```
-
-Windows and Linux packages can be produced from any supported build OS; macOS
-packages must be produced on macOS because Apple packaging/signing tools are
-required. Public installer releases should be code-signed.
+Non-Windows installer packaging is not documented as a verified command yet.
+It depends on the Avalonia GUI becoming the primary UI and on platform-specific
+validation for Linux/macOS publish output. macOS installer releases must be
+produced on macOS because Apple packaging and signing tools are required.
+Public installer releases should be code-signed.
 
 MSIX is not the primary path right now because VComTunnel needs explicit
 service and driver setup flows, while Velopack fits the current desktop app and
 future cross-platform installer/update story better.
 
-GitHub Actions can build the Windows installer online. Run the `Package`
-workflow from the Actions tab with a release version such as `1.0.0` or
-`1.0.0.rc2`, or push a `v*` tag. The
-workflow runs on `windows-latest`, builds and tests the solution, runs
-`scripts\package-velopack.ps1`, uploads the versioned public release assets as
-a workflow artifact, and can upload them to the matching GitHub Release when
-requested. Release versions containing `rc`, `alpha`, `beta`, `pre`, or
-`preview` are marked as GitHub pre-releases automatically. The current online
+GitHub Actions provides the online Windows release path through the `Package`
+workflow. The `v1.0.0.rc2` release was produced through this workflow with
+versioned public assets. The workflow runs on `windows-latest`, builds and
+tests the solution, runs `scripts\package-velopack.ps1`, uploads the versioned
+public release assets as a workflow artifact, and can upload them to the
+matching GitHub Release when requested. Release versions containing `rc`,
+`alpha`, `beta`, `pre`, or `preview` use the workflow's pre-release marking
+logic; confirm the GitHub Release flag before publishing. The current online
 packaging job is Windows-only until the Avalonia GUI publish output is
 available for Linux/macOS.
 

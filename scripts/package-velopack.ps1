@@ -1,7 +1,7 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$Version = "0.1.0",
+    [string]$Version = "0.0.0-dev",
     [string]$PackId = "VComTunnel",
     [string]$PackTitle = "VComTunnel",
     [string]$OutputRoot = "",
@@ -38,7 +38,7 @@ function ConvertTo-VelopackVersion {
         return "$($Matches[1])-$($Matches[2])$($Matches[3])"
     }
 
-    throw "Version '$ReleaseVersion' is not supported. Use SemVer2 such as 1.0.0-rc1, or release labels such as 1.0.0.rc1."
+    throw "Version '$ReleaseVersion' is not supported. Use SemVer2 such as 1.0.0-rc2, or release labels such as 1.0.0.rc2."
 }
 
 function Copy-PublicAsset {

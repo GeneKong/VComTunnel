@@ -47,9 +47,21 @@ kmdf:
 GUI 只是控制台和状态面板。映射启动以后可以由后台服务继续运行，关闭 GUI
 不会自动停止隧道。
 
-## 快速开始
+## Windows GUI 实测状态
 
-开发环境构建：
+![VComTunnel Windows GUI 运行 com0comHub4com 隧道](docs/images/vcomtunnel-gui-runtime.png)
+
+上图是 Windows 本地实测运行状态。界面显示后台服务已连接，当前共有 1 条映射、
+1 条正在运行、0 条故障。运行中的映射名为 `Tunnel 1`，后端为
+`com0comHub4com`，可见端口为 `COM12`，com0com 后端口为 `CNCB12`。诊断面板
+显示 `com0com/hub4com 就绪: True`、`KMDF 安装工具就绪: True`，并解析到
+`setupc.exe`、`hub4com.exe` 和 `com2tcp-rfc2217.bat` 的实际路径。日志面板显示
+`Tunnel 1` 的 RFC2217 收发记录。
+
+## 已验证的 Windows 构建
+
+以下命令是本地已验证的构建闭环。`dotnet restore` 需要 NuGet 访问权限；
+后续 `--no-restore` 命令要求 restore 已经成功完成。
 
 ```powershell
 dotnet restore VComTunnel.sln
@@ -61,7 +73,7 @@ scripts\smoke-local.ps1 -Configuration Release -NoBuild
 `smoke-local.ps1` 会使用临时 loopback 端口和临时 `VCOMTUNNEL_HOME` 启动
 console-mode 服务，不会写入已安装的本机服务配置。
 
-启动 GUI：
+启动 GUI 用于本机调试：
 
 ```powershell
 dotnet run --project src\VComTunnel.Gui\VComTunnel.Gui.csproj
@@ -166,11 +178,11 @@ vcomtunnelctl service uninstall
 
 ## 发布安装文件
 
-当前仓库已经提供发布脚本，输出的是一个用户可以直接解压运行的 portable
-目录和 `.zip` 包：
+当前仓库已经提供发布脚本。以下是已验证的 Windows portable 打包命令，输出
+用户可以直接解压运行的目录和 `.zip` 包：
 
 ```powershell
-scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
 ```
 
 默认包是 self-contained，目标机器不需要单独安装 .NET 运行时。用户解压到
@@ -178,21 +190,19 @@ scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64
 缓存会放在发布目录下的 `data` 目录。GUI 会在没有安装 Windows Service 时
 自动从同目录拉起 `VComTunnel.Service.exe --console` 后台进程。
 
-发布脚本默认 `--no-restore`。如果发布机可以访问 NuGet，可以加 `-Restore`；
-如果要生成体积更小、但要求目标机器预装 .NET 运行时的包，可以加
+不要省略 `-Restore`，除非发布机已经针对目标 RID 完成 runtime-specific
+restore。普通 solution restore 不足以生成 `win-x64` publish 所需的 assets。
+如果要生成体积更小、但要求目标机器预装 .NET 运行时的包，可以同时加
 `-FrameworkDependent`：
 
 ```powershell
 scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
-scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -FrameworkDependent
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore -FrameworkDependent
 ```
 
 默认发布脚本会从 `third_party\dependencies` 复制固定的第三方依赖归档。
-如果发布机需要使用单独复核过的归档缓存，可以传入同名、同 SHA256 的缓存目录：
-
-```powershell
-scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
-```
+如果发布机需要使用单独复核过的归档缓存，可以通过 `-DependencyArchiveRoot`
+传入同名、同 SHA256 的缓存目录。
 
 发布包会包含：
 
@@ -208,48 +218,40 @@ scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -DependencyArchi
 - `SHA256SUMS.txt`。
 
 这个脚本当前产出的是 portable zip，适合 GitHub Release 直接挂载给用户下载。
-如果要发布“普通用户双击安装”的安装器，优先使用 Velopack 脚本：
+如果要发布“普通用户双击安装”的安装器，使用以下已验证的 Windows Velopack
+打包命令：
 
 ```powershell
-dotnet tool restore
-scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore -Msi
 ```
 
 选择 Velopack 是为了后续跨平台分发保持同一套安装/更新模型：当前 WPF GUI
 只能打 Windows 包；等 Avalonia 跨平台 GUI 成为主入口后，同一套 Velopack
-流程可以继续覆盖 Windows、macOS 和 Linux。当前 Windows 包会生成 Velopack
-`Setup.exe` 和更新资产；如果需要 MSI，可以加 `-Msi`：
-
-```powershell
-scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Msi
-```
+流程可以继续覆盖 Windows、macOS 和 Linux。上述 Windows 命令会生成 Velopack
+`Setup.exe`、MSI、Velopack portable zip、staged portable zip 和 SHA-256 清单。
 
 公开下载文件会复制到 `artifacts\velopack\public\<runtime>`，并且每个文件名
 都会带发布版本号，例如 `VComTunnel-1.0.0.rc2-win-x64-Setup.exe`。
 Velopack 原始 update-feed 文件仍保留在 runtime 输出目录，继续使用 Velopack
 要求的固定文件名。
 
-后续非 Windows GUI 构建完成后，先发布跨平台应用目录，再把目录交给同一个脚本：
-
-```powershell
-scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
-scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
-```
-
-Windows 和 Linux 包可以从任意受支持的构建系统生成；macOS 包必须在 macOS
-上生成，因为需要 Apple 的打包和签名工具。正式公开安装器发布前应完成代码签名。
+非 Windows 安装包当前不作为已验证命令写入 README。后续需要等 Avalonia GUI
+成为主入口，并完成 Linux/macOS publish 产物的实际验证后再补充。macOS 安装包
+必须在 macOS 上生成，因为需要 Apple 的打包和签名工具。正式公开安装器发布前
+应完成代码签名。
 
 MSIX 暂不作为主线，因为 VComTunnel 仍涉及 Windows Service、com0com 驱动安装
 和后续 KMDF 签名边界。com0com 继续保留独立驱动安装确认，不静默绕过；KMDF
 生产发布前必须解决正式驱动签名，测试签名驱动不能作为普通用户安装包分发。
 
-GitHub Actions 已经可以在线打 Windows 安装包。进入 Actions 里的 `Package`
-workflow，填写 `1.0.0` 或 `1.0.0.rc2` 这样的发布版本后手动运行，或者推送
-`v*` tag。workflow 会在 `windows-latest` 上构建、运行测试、执行
-`scripts\package-velopack.ps1`，并把带版本号的公开发布文件上传为 workflow
-artifact；tag 触发或手动选择上传时会发布到对应 GitHub Release。版本号包含
-`rc`、`alpha`、`beta`、`pre` 或 `preview` 时会自动标记为 GitHub pre-release。
-当前线上打包仍是 Windows-only，等 Avalonia GUI 有 Linux/macOS publish 产物后再扩展矩阵。
+GitHub Actions 提供线上 Windows 发布路径。`v1.0.0.rc2` 已通过 `Package`
+workflow 生成带版本号的公开发布文件。workflow 在 `windows-latest` 上构建、
+运行测试、执行 `scripts\package-velopack.ps1`，并把带版本号的公开发布文件
+上传为 workflow artifact；tag 触发或手动选择上传时会发布到对应 GitHub
+Release。版本号包含 `rc`、`alpha`、`beta`、`pre` 或 `preview` 时会使用
+workflow 的 pre-release 标记逻辑；正式发布前需要在 GitHub Release 页面确认
+该标记。当前线上打包仍是 Windows-only，等 Avalonia GUI 有 Linux/macOS publish
+产物并完成验证后再扩展矩阵。
 
 ## KMDF 驱动
 
