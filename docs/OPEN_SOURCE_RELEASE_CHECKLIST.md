@@ -61,7 +61,7 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
 ## Release Artifacts
 
 - Confirm every public GitHub Release asset name includes the release version,
-  for example `VComTunnel-1.0.0.rc1-win-x64-Setup.exe`.
+  for example `VComTunnel-1.0.0.rc2-win-x64-Setup.exe`.
 - Confirm the public artifact name includes `portable` for the default
   self-contained user download.
 - Confirm `README-FIRST.txt` and `README-FIRST.zh-CN.txt` are generated.
@@ -81,6 +81,8 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
   archives are bundled.
 - Confirm GitHub tag packaging bundles the pinned `third_party/dependencies`
   archives by default and validates their SHA256 values before publishing.
+- Confirm release versions containing `rc`, `alpha`, `beta`, `pre`, or
+  `preview` are marked as GitHub pre-releases.
 - Confirm the Velopack installer keeps com0com driver setup explicit and does
   not silently install drivers or the experimental KMDF prototype.
 - Confirm GitHub Actions artifacts include only versioned public release assets

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, for example 1.0.0 or 1.0.0.rc1"
+        description: "Release version, for example 1.0.0 or 1.0.0.rc2"
         required: true
-        default: "0.1.0"
+        default: "1.0.0.rc2"
       runtime:
         description: "Runtime identifier"
         required: true
@@ -70,7 +70,7 @@ jobs:
               return "$($Matches[1])-$($Matches[2])$($Matches[3])"
             }
 
-            throw "Version '$ReleaseVersion' is not supported. Use SemVer2 such as 1.0.0-rc1, or release labels such as 1.0.0.rc1."
+            throw "Version '$ReleaseVersion' is not supported. Use SemVer2 such as 1.0.0-rc2, or release labels such as 1.0.0.rc2."
           }
 
           if ("${{ github.ref_type }}" -eq "tag") {
@@ -84,8 +84,10 @@ jobs:
           }
 
           $packageVersion = ConvertTo-VelopackVersion $version
+          $preRelease = $packageVersion -match '(?i)(^|[.\-])(alpha|beta|rc|preview|pre)([.\-]|[0-9]|$)'
           "version=$version" >> $env:GITHUB_OUTPUT
           "package_version=$packageVersion" >> $env:GITHUB_OUTPUT
+          "prerelease=$($preRelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "tag=v$version" >> $env:GITHUB_OUTPUT
 
       - name: Restore dependencies and tools
@@ -134,6 +136,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ steps.meta.outputs.tag }}" }
+          $preRelease = [System.Convert]::ToBoolean("${{ steps.meta.outputs.prerelease }}")
           $assetPaths = @(
             Get-ChildItem -LiteralPath "artifacts\github-release\public\${{ env.PACKAGE_RUNTIME }}" -File
           )
@@ -151,9 +154,35 @@ jobs:
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag @assetArguments --verify-tag --title "VComTunnel ${{ steps.meta.outputs.version }}" --notes "Automated VComTunnel packaging artifacts."
+            $createArgs = @(
+              "release",
+              "create",
+              $tag
+            ) + $assetArguments + @(
+              "--verify-tag",
+              "--title",
+              "VComTunnel ${{ steps.meta.outputs.version }}",
+              "--notes",
+              "Automated VComTunnel packaging artifacts."
+            )
+            if ($preRelease) {
+              $createArgs += "--prerelease"
+            }
+
+            & gh @createArgs
           } else {
             gh release upload $tag @assetArguments --clobber
+          }
+
+          $releaseId = gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq ".id"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseId)) {
+            throw "Could not resolve GitHub Release id for $tag."
+          }
+
+          $preReleaseField = if ($preRelease) { "true" } else { "false" }
+          gh api --method PATCH "repos/${{ github.repository }}/releases/$releaseId" -F "prerelease=$preReleaseField" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not update GitHub Release prerelease flag for $tag."
           }
 
           $uploadedCount = gh release view $tag --json assets --jq ".assets | length"

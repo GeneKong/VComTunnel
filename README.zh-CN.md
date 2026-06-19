@@ -170,7 +170,7 @@ vcomtunnelctl service uninstall
 目录和 `.zip` 包：
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64
 ```
 
 默认包是 self-contained，目标机器不需要单独安装 .NET 运行时。用户解压到
@@ -183,15 +183,15 @@ scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64
 `-FrameworkDependent`：
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -FrameworkDependent
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -FrameworkDependent
 ```
 
 默认发布脚本会从 `third_party\dependencies` 复制固定的第三方依赖归档。
 如果发布机需要使用单独复核过的归档缓存，可以传入同名、同 SHA256 的缓存目录：
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
 ```
 
 发布包会包含：
@@ -212,7 +212,7 @@ scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -DependencyArchiveRo
 
 ```powershell
 dotnet tool restore
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
 ```
 
 选择 Velopack 是为了后续跨平台分发保持同一套安装/更新模型：当前 WPF GUI
@@ -221,19 +221,19 @@ scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
 `Setup.exe` 和更新资产；如果需要 MSI，可以加 `-Msi`：
 
 ```powershell
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Msi
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Msi
 ```
 
 公开下载文件会复制到 `artifacts\velopack\public\<runtime>`，并且每个文件名
-都会带发布版本号，例如 `VComTunnel-1.0.0.rc1-win-x64-Setup.exe`。
+都会带发布版本号，例如 `VComTunnel-1.0.0.rc2-win-x64-Setup.exe`。
 Velopack 原始 update-feed 文件仍保留在 runtime 输出目录，继续使用 Velopack
 要求的固定文件名。
 
 后续非 Windows GUI 构建完成后，先发布跨平台应用目录，再把目录交给同一个脚本：
 
 ```powershell
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
 ```
 
 Windows 和 Linux 包可以从任意受支持的构建系统生成；macOS 包必须在 macOS
@@ -244,11 +244,12 @@ MSIX 暂不作为主线，因为 VComTunnel 仍涉及 Windows Service、com0com 
 生产发布前必须解决正式驱动签名，测试签名驱动不能作为普通用户安装包分发。
 
 GitHub Actions 已经可以在线打 Windows 安装包。进入 Actions 里的 `Package`
-workflow，填写 `1.0.0` 或 `1.0.0.rc1` 这样的发布版本后手动运行，或者推送
+workflow，填写 `1.0.0` 或 `1.0.0.rc2` 这样的发布版本后手动运行，或者推送
 `v*` tag。workflow 会在 `windows-latest` 上构建、运行测试、执行
 `scripts\package-velopack.ps1`，并把带版本号的公开发布文件上传为 workflow
-artifact；需要时也可以上传到对应 GitHub Release。当前线上打包仍是
-Windows-only，等 Avalonia GUI 有 Linux/macOS publish 产物后再扩展矩阵。
+artifact；tag 触发或手动选择上传时会发布到对应 GitHub Release。版本号包含
+`rc`、`alpha`、`beta`、`pre` 或 `preview` 时会自动标记为 GitHub pre-release。
+当前线上打包仍是 Windows-only，等 Avalonia GUI 有 Linux/macOS publish 产物后再扩展矩阵。
 
 ## KMDF 驱动
 

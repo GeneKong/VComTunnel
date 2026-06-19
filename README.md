@@ -227,7 +227,7 @@ notes, and bundled dependency archives into one distributable portable folder
 and `.zip`:
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64
 ```
 
 The default package is self-contained and is intended for direct user download:
@@ -243,7 +243,7 @@ smaller package that requires installed .NET runtimes on the target machine,
 pass `-FrameworkDependent`:
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -FrameworkDependent
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -FrameworkDependent
 ```
 
 By default the script copies the pinned archives from
@@ -252,7 +252,7 @@ need to build with a separately reviewed cache, provide a pre-populated archive
 directory with the same file names and SHA256 values:
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
 ```
 
 The package also includes:
@@ -274,7 +274,7 @@ For installer-style distribution, use the Velopack packaging script:
 
 ```powershell
 dotnet tool restore
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
 ```
 
 Velopack is the preferred installer/update tool because the same packaging
@@ -284,20 +284,20 @@ available. On Windows the script produces a Velopack `Setup.exe` and update
 assets; pass `-Msi` to also generate an MSI:
 
 ```powershell
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Msi
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Msi
 ```
 
 Public download files are copied to `artifacts\velopack\public\<runtime>` with
 the release version in every file name, for example
-`VComTunnel-1.0.0.rc1-win-x64-Setup.exe`. Velopack's raw update-feed files stay
+`VComTunnel-1.0.0.rc2-win-x64-Setup.exe`. Velopack's raw update-feed files stay
 under the runtime output directory and keep Velopack's expected names.
 
 For future non-Windows GUI builds, publish the cross-platform app first and pass
 its output directory to the same script:
 
 ```powershell
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
 ```
 
 Windows and Linux packages can be produced from any supported build OS; macOS
@@ -310,12 +310,14 @@ future cross-platform installer/update story better.
 
 GitHub Actions can build the Windows installer online. Run the `Package`
 workflow from the Actions tab with a release version such as `1.0.0` or
-`1.0.0.rc1`, or push a `v*` tag. The
+`1.0.0.rc2`, or push a `v*` tag. The
 workflow runs on `windows-latest`, builds and tests the solution, runs
 `scripts\package-velopack.ps1`, uploads the versioned public release assets as
 a workflow artifact, and can upload them to the matching GitHub Release when
-requested. The current online packaging job is Windows-only until the Avalonia
-GUI publish output is available for Linux/macOS.
+requested. Release versions containing `rc`, `alpha`, `beta`, `pre`, or
+`preview` are marked as GitHub pre-releases automatically. The current online
+packaging job is Windows-only until the Avalonia GUI publish output is
+available for Linux/macOS.
 
 Each `com0comHub4com` mapping expects:
 
