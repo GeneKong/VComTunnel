@@ -120,6 +120,7 @@ public sealed class DependencyInstaller
 
             Directory.CreateDirectory(Path.GetDirectoryName(archivePath)!);
             var archiveSource = await PrepareArchiveAsync(archiveName, url, archivePath, cancellationToken);
+            ValidateArchiveContains(archivePath, [expectedFile]);
 
             if (force && Directory.Exists(extractPath))
             {
@@ -167,6 +168,7 @@ public sealed class DependencyInstaller
 
             Directory.CreateDirectory(Path.GetDirectoryName(archivePath)!);
             var archiveSource = await PrepareArchiveAsync(archiveName, url, archivePath, cancellationToken);
+            ValidateArchiveContains(archivePath, expectedFiles);
 
             if (force && Directory.Exists(extractPath))
             {
@@ -219,6 +221,32 @@ public sealed class DependencyInstaller
 
         await DownloadAsync(url, archivePath, cancellationToken);
         return "Downloaded";
+    }
+
+    private static void ValidateArchiveContains(string archivePath, IReadOnlyList<string> expectedFiles)
+    {
+        try
+        {
+            using var archive = ZipFile.OpenRead(archivePath);
+            var entryNames = archive.Entries
+                .Select(entry => Path.GetFileName(entry.FullName.Replace('\\', '/')))
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (expectedFiles.Any(entryNames.Contains))
+            {
+                return;
+            }
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new InvalidDataException(
+                $"Dependency archive '{archivePath}' is not a valid zip. The download source may have returned an HTML page instead of an archive.",
+                ex);
+        }
+
+        throw new InvalidDataException(
+            $"Dependency archive '{archivePath}' does not contain any expected file: {string.Join(", ", expectedFiles)}.");
     }
 
     private static string? FindBundledArchive(string archiveName)

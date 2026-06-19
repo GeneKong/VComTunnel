@@ -39,7 +39,8 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("fake com2tcp process restarts after exit", FakeCom2TcpProcessRestartsAfterExitAsync),
     ("manual stop suppresses fake com2tcp restart", ManualStopSuppressesFakeCom2TcpRestartAsync),
     ("dependency installer extracts tool zips", DependencyInstallerExtractsToolZipsAsync),
-    ("dependency installer uses bundled release archives", DependencyInstallerUsesBundledReleaseArchivesAsync)
+    ("dependency installer uses bundled release archives", DependencyInstallerUsesBundledReleaseArchivesAsync),
+    ("dependency installer rejects HTML downloads", DependencyInstallerRejectsHtmlDownloadsAsync)
 };
 
 var failed = 0;
@@ -1222,6 +1223,34 @@ static async Task DependencyInstallerUsesBundledReleaseArchivesAsync()
     }
 }
 
+static async Task DependencyInstallerRejectsHtmlDownloadsAsync()
+{
+    using var temp = new TempDir();
+    var oldHome = Environment.GetEnvironmentVariable("VCOMTUNNEL_HOME");
+    Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", temp.Path);
+    try
+    {
+        var http = new HttpClient(new HtmlDownloadHandler())
+        {
+            BaseAddress = new Uri("https://example.invalid/")
+        };
+        var detector = new DependencyDetector([AppPaths.ToolsDirectory], pathOverride: "");
+        var installer = new DependencyInstaller(detector, http);
+        var result = await installer.InstallAsync(new DependencyInstallRequest(DownloadCom0com: false));
+
+        var step = result.Steps.Single();
+        AssertTrue(!step.Success, "HTML download should not be accepted as a dependency archive.");
+        AssertStringContains(step.Message, "not a valid zip");
+        AssertTrue(!Directory.Exists(Path.Combine(AppPaths.ToolsDirectory, "hub4com"))
+            || !Directory.EnumerateFiles(Path.Combine(AppPaths.ToolsDirectory, "hub4com"), "com2tcp-rfc2217.bat", SearchOption.AllDirectories).Any(),
+            "Invalid downloads should not produce usable hub4com tools.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", oldHome);
+    }
+}
+
 static async Task<ConfigStore> StoreWithMappingAsync(string root, TunnelMapping mapping)
 {
     var store = new ConfigStore(Path.Combine(root, "config.json"));
@@ -1443,6 +1472,18 @@ internal sealed class ThrowingHandler : HttpMessageHandler
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         throw new InvalidOperationException("Network should not be used when bundled dependency archives are available.");
+    }
+}
+
+internal sealed class HtmlDownloadHandler : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("<!doctype html><html><body>download page</body></html>")
+        };
+        return Task.FromResult(response);
     }
 }
 

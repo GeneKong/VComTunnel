@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
@@ -200,13 +201,47 @@ $dependencyArchives = @(
         Name = "hub4com-2.1.0.0-386.zip"
         Url = "https://sourceforge.net/projects/com0com/files/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip/download"
         Description = "hub4com 2.1.0.0 RFC2217 bridge tools"
+        ExpectedFiles = @("hub4com.exe", "com2tcp-rfc2217.bat")
     },
     @{
         Name = "com0com-3.0.0.0-i386-and-x64-signed.zip"
         Url = "https://sourceforge.net/projects/com0com/files/com0com/3.0.0.0/com0com-3.0.0.0-i386-and-x64-signed.zip/download"
         Description = "com0com 3.0.0.0 signed installer package"
+        ExpectedFiles = @("setupc.exe", "Setup_com0com_v3.0.0.0_W7_x64_signed.exe", "Setup_com0com_v3.0.0.0_W7_x86_signed.exe")
     }
 )
+
+function Assert-DependencyArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string[]]$ExpectedFiles
+    )
+
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
+        try {
+            $entryNames = @(
+                $zip.Entries |
+                    ForEach-Object { [System.IO.Path]::GetFileName($_.FullName.Replace('\', '/')) } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            )
+
+            foreach ($expected in $ExpectedFiles) {
+                if ($entryNames -contains $expected) {
+                    return
+                }
+            }
+
+            throw "missing expected file(s): $($ExpectedFiles -join ', ')"
+        } finally {
+            $zip.Dispose()
+        }
+    } catch {
+        throw "Dependency archive '$Path' is not a valid release zip or is missing required files. SourceForge may have returned an HTML download page. Details: $($_.Exception.Message)"
+    }
+}
 
 if (-not $SkipBundledDependencies) {
     $dependenciesDir = Join-Path $packageRoot "dependencies"
@@ -225,6 +260,8 @@ if (-not $SkipBundledDependencies) {
         } else {
             Invoke-WebRequest -Uri $archive.Url -OutFile $target
         }
+
+        Assert-DependencyArchive -Path $target -ExpectedFiles $archive.ExpectedFiles
     }
 }
 

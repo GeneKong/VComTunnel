@@ -65,8 +65,8 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
 - Confirm `Start-VComTunnel-Portable.cmd` launches the GUI from an extracted
   writable folder and keeps app data under the package `data` directory.
 - Confirm `Setup-Dependencies-Portable.cmd` uses bundled dependency archives
-  when present and still leaves com0com driver installation to an elevated
-  user approval.
+  when present, rejects invalid archives, and still leaves com0com driver
+  installation to an elevated user approval.
 - Confirm `Install-Windows-Service.cmd` and `Uninstall-Windows-Service.cmd`
   elevate through UAC and call `vcomtunnelctl service ...` instead of requiring
   users to type `sc.exe` commands.
@@ -76,6 +76,9 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
 - Confirm `SHA256SUMS.txt` is generated in the package.
 - Confirm the package can run without runtime network downloads when dependency
   archives are bundled.
+- Confirm GitHub tag packaging does not bundle third-party archives by default;
+  only enable bundling when the archive source is known to produce valid zip
+  files in CI.
 - Confirm the Velopack installer keeps com0com driver setup explicit and does
   not silently install drivers or the experimental KMDF prototype.
 - Confirm GitHub Actions artifacts include the Velopack release directory and
