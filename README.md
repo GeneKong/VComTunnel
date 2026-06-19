@@ -182,6 +182,11 @@ archives under the release `dependencies` directory:
 - `dependencies\hub4com-2.1.0.0-386.zip`
 - `dependencies\com0com-3.0.0.0-i386-and-x64-signed.zip`
 
+The repository keeps pinned copies of these upstream archives under
+`third_party\dependencies` so local and GitHub release packaging can run without
+network access to SourceForge. The packaging script validates the archive
+contents and SHA256 values before copying them into a release package.
+
 Official dependency download links:
 
 - hub4com 2.1.0.0:
@@ -241,9 +246,10 @@ pass `-FrameworkDependent`:
 scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -FrameworkDependent
 ```
 
-By default the script downloads the two upstream dependency archives into the
-package `dependencies` directory. For repeatable/offline release builds, provide
-a pre-populated archive cache:
+By default the script copies the pinned archives from
+`third_party\dependencies` into the package `dependencies` directory. If you
+need to build with a separately reviewed cache, provide a pre-populated archive
+directory with the same file names and SHA256 values:
 
 ```powershell
 scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel

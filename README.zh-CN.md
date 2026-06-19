@@ -89,8 +89,10 @@ dotnet run --project src\VComTunnel.Cli\VComTunnel.Cli.csproj -- mappings
 - com0com：创建 Windows 可见的虚拟串口对。
 - hub4com：把 com0com 的另一端接到 RFC2217 目标。
 
-VComTunnel 的依赖安装功能会优先使用发布包里的离线归档。如果归档不存在，
-开发构建会尝试下载官方 SourceForge 包：
+VComTunnel 的依赖安装功能会优先使用发布包里的离线归档。仓库内也固定保存了
+这两个上游原始归档，路径是 `third_party\dependencies`，这样本地和 GitHub
+打包都不需要临时访问 SourceForge。发布脚本会校验归档内容和 SHA256。
+如果归档不存在，开发构建才会尝试下载官方 SourceForge 包：
 
 - hub4com 2.1.0.0:
   <https://sourceforge.net/projects/com0com/files/hub4com/2.1.0.0/hub4com-2.1.0.0-386.zip/download>
@@ -185,7 +187,8 @@ scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
 scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -FrameworkDependent
 ```
 
-如果要做可复现的离线发布，提前准备第三方依赖归档，并传入缓存目录：
+默认发布脚本会从 `third_party\dependencies` 复制固定的第三方依赖归档。
+如果发布机需要使用单独复核过的归档缓存，可以传入同名、同 SHA256 的缓存目录：
 
 ```powershell
 scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel

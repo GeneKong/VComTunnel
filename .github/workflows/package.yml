@@ -20,7 +20,7 @@ on:
         default: true
         type: boolean
       bundle_dependencies:
-        description: "Bundle com0com/hub4com dependency archives"
+        description: "Bundle pinned com0com/hub4com dependency archives"
         required: true
         default: true
         type: boolean

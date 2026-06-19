@@ -13,6 +13,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$repoDependencyArchiveRoot = Join-Path $repoRoot "third_party\dependencies"
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repoRoot "artifacts\release"
 }
@@ -209,6 +210,7 @@ $dependencyArchives = @(
         )
         Description = "hub4com 2.1.0.0 RFC2217 bridge tools"
         ExpectedFiles = @("hub4com.exe", "com2tcp-rfc2217.bat")
+        Sha256 = "24CCA36CCF0CAB0F988BB59851B5EC947667EFE53C4F43F290392AD308AC0E01"
     },
     @{
         Name = "com0com-3.0.0.0-i386-and-x64-signed.zip"
@@ -222,6 +224,7 @@ $dependencyArchives = @(
         )
         Description = "com0com 3.0.0.0 signed installer package"
         ExpectedFiles = @("Setup_com0com_v3.0.0.0_W7_x64_signed.exe", "Setup_com0com_v3.0.0.0_W7_x86_signed.exe")
+        Sha256 = "6E5D4359865277430D4AE88C73FB7E648A0ED8E81AEA5002478179CFCB0BB0E1"
     }
 )
 
@@ -230,10 +233,18 @@ function Assert-DependencyArchive {
         [Parameter(Mandatory = $true)]
         [string]$Path,
         [Parameter(Mandatory = $true)]
-        [string[]]$ExpectedFiles
+        [string[]]$ExpectedFiles,
+        [string]$Sha256
     )
 
     try {
+        if (-not [string]::IsNullOrWhiteSpace($Sha256)) {
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+            if (-not [string]::Equals($actualHash, $Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "SHA256 mismatch: expected $Sha256, got $actualHash"
+            }
+        }
+
         $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
         try {
             $entryNames = @(
@@ -267,7 +278,18 @@ function Save-DependencyArchive {
 
     if ($Source -and (Test-Path $Source)) {
         Copy-Item -LiteralPath $Source -Destination $Target -Force
-        Assert-DependencyArchive -Path $Target -ExpectedFiles $Archive.ExpectedFiles
+        Assert-DependencyArchive -Path $Target -ExpectedFiles $Archive.ExpectedFiles -Sha256 $Archive.Sha256
+        return
+    }
+
+    if ($Source) {
+        throw "Dependency archive source was specified but does not exist: $Source"
+    }
+
+    $repoSource = Join-Path $repoDependencyArchiveRoot $Archive.Name
+    if (Test-Path -LiteralPath $repoSource) {
+        Copy-Item -LiteralPath $repoSource -Destination $Target -Force
+        Assert-DependencyArchive -Path $Target -ExpectedFiles $Archive.ExpectedFiles -Sha256 $Archive.Sha256
         return
     }
 
@@ -275,7 +297,7 @@ function Save-DependencyArchive {
     foreach ($url in $Archive.Urls) {
         try {
             Invoke-WebRequest -Uri $url -OutFile $Target -UserAgent "Wget/1.21.4"
-            Assert-DependencyArchive -Path $Target -ExpectedFiles $Archive.ExpectedFiles
+            Assert-DependencyArchive -Path $Target -ExpectedFiles $Archive.ExpectedFiles -Sha256 $Archive.Sha256
             return
         } catch {
             $errors += "$url => $($_.Exception.Message)"
@@ -317,6 +339,7 @@ foreach ($archive in $dependencyArchives) {
     $noticeLines += "- $($archive.Description)"
     $noticeLines += "  Archive: $($archive.Name)"
     $noticeLines += "  Source: $($archive.Url)"
+    $noticeLines += "  SHA256: $($archive.Sha256)"
 }
 
 Set-Content -LiteralPath (Join-Path $packageRoot "THIRD-PARTY-NOTICES.txt") -Value $noticeLines -Encoding UTF8

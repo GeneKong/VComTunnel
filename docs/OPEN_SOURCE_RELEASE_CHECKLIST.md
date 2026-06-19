@@ -79,9 +79,8 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
 - Confirm `SHA256SUMS.txt` is generated in the package.
 - Confirm the package can run without runtime network downloads when dependency
   archives are bundled.
-- Confirm GitHub tag packaging does not bundle third-party archives by default;
-  only enable bundling when the archive source is known to produce valid zip
-  files in CI.
+- Confirm GitHub tag packaging bundles the pinned `third_party/dependencies`
+  archives by default and validates their SHA256 values before publishing.
 - Confirm the Velopack installer keeps com0com driver setup explicit and does
   not silently install drivers or the experimental KMDF prototype.
 - Confirm GitHub Actions artifacts include only versioned public release assets
