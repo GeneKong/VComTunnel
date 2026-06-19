@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -24,13 +25,15 @@ public partial class MainWindow : Window
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
 
-    private readonly HttpClient _client = new() { BaseAddress = new Uri("http://127.0.0.1:44817") };
+    private readonly HttpClient _client = new() { BaseAddress = new Uri(ServiceEndpoint.DefaultUrl) };
     private readonly ObservableCollection<MappingRow> _mappings = [];
     private readonly ObservableCollection<ComPairRow> _comPairs = [];
     private readonly List<string> _guiLogLines = [];
+    private readonly HashSet<string> _autoStartPromptRows = new(StringComparer.OrdinalIgnoreCase);
     private bool _serviceStartAttempted;
     private bool _dependencyPollActive;
     private bool _serviceRestarting;
+    private bool _dependencySetupActive;
     private bool _updatingLanguage;
     private bool _updatingSelection;
     private bool _savingMappings;
@@ -41,11 +44,12 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _mappings.CollectionChanged += Mappings_CollectionChanged;
         MappingsGrid.ItemsSource = _mappings;
         ComPairsList.ItemsSource = _comPairs;
         ApplyLocalization();
         UpdateMappingCommandState();
-        _ = InitializeAsync();
+        Loaded += MainWindow_Loaded;
     }
 
     protected override void OnClosed(EventArgs e)
@@ -82,6 +86,7 @@ public partial class MainWindow : Window
         SetToolbarButton(RefreshButton, PackIconMaterialKind.Refresh, "Action.Refresh");
         SetToolbarButton(RestartServiceButton, PackIconMaterialKind.Restart, "Action.RestartService");
         SetToolbarButton(AddButton, PackIconMaterialKind.Plus, "Action.Add");
+        SetToolbarButton(SaveButton, PackIconMaterialKind.ContentSave, "Action.Save");
         SetToolbarButton(DeleteMappingButton, PackIconMaterialKind.DeleteOutline, "Action.DeleteMapping");
         SetToolbarButton(StartButton, PackIconMaterialKind.Play, "Action.Start");
         SetToolbarButton(StopButton, PackIconMaterialKind.Stop, "Action.Stop");
@@ -107,12 +112,14 @@ public partial class MainWindow : Window
         SetCommandMenuItem(ClearLogsMenuItem, PackIconMaterialKind.Broom, "Action.ClearLogs");
         SetCommandMenuItem(StartMappingMenuItem, PackIconMaterialKind.Play, "Action.Start");
         SetCommandMenuItem(StopMappingMenuItem, PackIconMaterialKind.Stop, "Action.Stop");
+        SetCommandMenuItem(SaveSelectedMappingMenuItem, PackIconMaterialKind.ContentSave, "Action.Save");
         SetCommandMenuItem(DeleteSelectedMappingMenuItem, PackIconMaterialKind.DeleteOutline, "Action.DeleteMapping");
         SetCommandMenuItem(DeleteSelectedComPairMenuItem, PackIconMaterialKind.DeleteOutline, "Action.DeleteSelectedPair");
 
         TunnelMappingsGroupBox.Header = T("Group.Mappings");
         DependenciesGroupBox.Header = T("Group.DependenciesPairs");
         LogsGroupBox.Header = T("Group.Logs");
+        DependencyProgressText.Text = T("Status.DependencySetupRunning");
         NameColumn.Header = T("Column.Name");
         BackendColumn.Header = T("Column.Backend");
         VisibleComColumn.Header = T("Column.VisibleCom");
@@ -122,6 +129,7 @@ public partial class MainWindow : Window
         AutoColumn.Header = T("Column.Auto");
         RestartColumn.Header = T("Column.Restart");
         MappingStateColumn.Header = T("Column.State");
+        ServiceColumn.Header = T("Column.Service");
         PairNumberColumn.Header = T("Column.PortType");
         PairPortAColumn.Header = T("Column.PortA");
         PairPortBColumn.Header = T("Column.PortB");
@@ -163,6 +171,7 @@ public partial class MainWindow : Window
         foreach (var row in _mappings)
         {
             row.StateLabel = GuiText.State(_language, row.RunState);
+            row.RefreshServiceLabel(_language);
         }
 
         MappingsGrid.Items.Refresh();
@@ -192,6 +201,19 @@ public partial class MainWindow : Window
 
     private async void StartSelectedMapping_Click(object sender, RoutedEventArgs e) => await PostSelectedAsync("start");
     private async void StopSelectedMapping_Click(object sender, RoutedEventArgs e) => await PostSelectedAsync("stop");
+
+    private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        Loaded -= MainWindow_Loaded;
+        try
+        {
+            await InitializeAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.InitialRefreshFailed", ex.Message), "error");
+        }
+    }
 
     private void EnglishLanguageMenuItem_Click(object sender, RoutedEventArgs e) => SetLanguage(UiLanguage.English);
 
@@ -280,6 +302,35 @@ public partial class MainWindow : Window
 
     private void MappingsGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e) => ScheduleAutoSave();
 
+    private void Mappings_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.OldItems is not null)
+        {
+            foreach (MappingRow row in e.OldItems)
+            {
+                row.AutoStartEnabledRequested -= MappingRow_AutoStartEnabledRequested;
+            }
+        }
+
+        if (e.NewItems is not null)
+        {
+            foreach (MappingRow row in e.NewItems)
+            {
+                row.AutoStartEnabledRequested += MappingRow_AutoStartEnabledRequested;
+            }
+        }
+    }
+
+    private async void MappingRow_AutoStartEnabledRequested(object? sender, EventArgs e)
+    {
+        if (sender is not MappingRow row || _suppressAutoSave)
+        {
+            return;
+        }
+
+        await HandleAutoStartEnabledAsync(row);
+    }
+
     private void MappingsGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is not DataGrid grid || e.OriginalSource is not DependencyObject source)
@@ -319,7 +370,11 @@ public partial class MainWindow : Window
         var canUseMapping = row is not null;
         var canUsePort = row is not null || port is not null;
         var canUpdateKmdf = row?.IsKmdf == true || port?.IsKmdf == true;
+        var canSaveMappings = _mappings.Count > 0 && !_savingMappings;
 
+        SaveButton.IsEnabled = canSaveMappings;
+        SaveMenuItem.IsEnabled = canSaveMappings;
+        SaveSelectedMappingMenuItem.IsEnabled = canSaveMappings;
         DeleteMappingButton.IsEnabled = canUseMapping;
         DeleteMappingMenuItem.IsEnabled = canUseMapping;
         DeleteSelectedMappingMenuItem.IsEnabled = canUseMapping;
@@ -332,11 +387,13 @@ public partial class MainWindow : Window
         StopMappingCommandMenuItem.IsEnabled = canStop;
         StartMappingMenuItem.IsEnabled = canStart;
         StopMappingMenuItem.IsEnabled = canStop;
+        SetupDepsButton.IsEnabled = !_dependencySetupActive;
+        SetupDepsMenuItem.IsEnabled = !_dependencySetupActive;
     }
 
     private void Add_Click(object sender, RoutedEventArgs e)
     {
-        var portNumber = 12 + _mappings.Count;
+        var portNumber = NextDefaultComPortNumber();
         var row = new MappingRow
         {
             Id = Guid.NewGuid().ToString("n"),
@@ -356,6 +413,7 @@ public partial class MainWindow : Window
         MappingsGrid.Items.Refresh();
         SetStatus(T("Status.AddedMapping"));
         UpdateMappingCommandState();
+        ScheduleAutoSave();
     }
 
     private async Task RefreshAsync()
@@ -385,7 +443,7 @@ public partial class MainWindow : Window
                 _suppressAutoSave = false;
             }
 
-            await RefreshMappingStatesAsync();
+            var serviceStatus = await RefreshMappingStatesAsync();
             var dependencies = await _client.GetFromJsonAsync<SystemDependencyReport>("/api/dependencies", JsonOptions);
             DependenciesText.Text = FormatDependencies(dependencies);
             var localDependencies = new DependencyDetector().Detect();
@@ -401,7 +459,7 @@ public partial class MainWindow : Window
             await RefreshLogsAsync();
             if (!dependencyStale)
             {
-                ServiceStateText.Text = TF("Status.ServiceConnected", _mappings.Count);
+                ServiceStateText.Text = FormatServiceSummary(serviceStatus, _mappings.Count);
             }
         }
         catch (Exception ex)
@@ -498,19 +556,25 @@ public partial class MainWindow : Window
             return;
         }
 
+        await InstallServiceCoreAsync();
+    }
+
+    private async Task<bool> InstallServiceCoreAsync()
+    {
         var servicePath = ResolveServicePath();
         if (servicePath is null)
         {
             SetStatus(T("Diag.ServiceNotFound"), "error");
-            return;
+            return false;
         }
 
         SetStatus(T("Status.ServiceInstalling"));
         if (!await RunServiceCtlElevatedAsync("install", [servicePath]))
         {
-            return;
+            return false;
         }
 
+        await RunServiceCtlElevatedAsync("stop", [], reportFailure: false);
         StopLocalServiceProcesses();
         await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(8));
 
@@ -520,11 +584,198 @@ public partial class MainWindow : Window
             {
                 await RefreshAsync();
                 SetStatus(T("Status.ServiceInstalled"));
-                return;
+                return true;
             }
         }
 
         SetStatus(T("Status.ServiceInstalled"));
+        return true;
+    }
+
+    private async Task HandleAutoStartEnabledAsync(MappingRow row)
+    {
+        if (!row.AutoStart || !_autoStartPromptRows.Add(row.Id))
+        {
+            return;
+        }
+
+        CancelPendingAutoSave();
+        try
+        {
+            var servicePath = ResolveServicePath();
+            var service = await GetInstalledWindowsServiceInfoAsync();
+            var servicePathMatches = ServiceBinaryPathMatches(service.BinaryPath, servicePath);
+            if (service.State != InstalledWindowsServiceState.NotInstalled && !servicePathMatches)
+            {
+                await HandleAutoStartWithMismatchedServiceAsync(row, service.BinaryPath, servicePath);
+                return;
+            }
+
+            if (service.State == InstalledWindowsServiceState.Running)
+            {
+                ScheduleAutoSave();
+                return;
+            }
+
+            if (service.State == InstalledWindowsServiceState.NotInstalled)
+            {
+                await HandleAutoStartWithoutInstalledServiceAsync(row);
+                return;
+            }
+
+            await HandleAutoStartWithStoppedServiceAsync(row);
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.AutoStartServiceCheckFailed", ex.Message), "warn");
+            ScheduleAutoSave();
+        }
+        finally
+        {
+            _autoStartPromptRows.Remove(row.Id);
+        }
+    }
+
+    private async Task HandleAutoStartWithoutInstalledServiceAsync(MappingRow row)
+    {
+        var answer = MessageBox.Show(
+            T("Prompt.AutoStartInstallService"),
+            T("Title.AutoStart"),
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Question);
+
+        if (answer == MessageBoxResult.Cancel)
+        {
+            RevertAutoStart(row);
+            return;
+        }
+
+        if (answer == MessageBoxResult.No)
+        {
+            if (await SaveMappingsAsync(logSuccess: false))
+            {
+                SetStatus(T("Status.AutoStartSavedNeedsService"), "warn");
+            }
+            return;
+        }
+
+        if (!await SaveMappingsAsync(logSuccess: false))
+        {
+            return;
+        }
+
+        if (await InstallServiceCoreAsync())
+        {
+            SetStatus(T("Status.AutoStartServiceReady"));
+        }
+    }
+
+    private async Task HandleAutoStartWithMismatchedServiceAsync(MappingRow row, string? currentServicePath, string? expectedServicePath)
+    {
+        var answer = MessageBox.Show(
+            TF(
+                "Prompt.AutoStartRepairService",
+                string.IsNullOrWhiteSpace(currentServicePath) ? T("Msg.Unknown") : currentServicePath,
+                string.IsNullOrWhiteSpace(expectedServicePath) ? T("Msg.Unknown") : expectedServicePath),
+            T("Title.AutoStart"),
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Warning);
+
+        if (answer == MessageBoxResult.Cancel)
+        {
+            RevertAutoStart(row);
+            return;
+        }
+
+        if (answer == MessageBoxResult.No)
+        {
+            if (await SaveMappingsAsync(logSuccess: false))
+            {
+                SetStatus(T("Status.AutoStartSavedNeedsServiceRepair"), "warn");
+            }
+            return;
+        }
+
+        if (!await SaveMappingsAsync(logSuccess: false))
+        {
+            return;
+        }
+
+        if (await InstallServiceCoreAsync())
+        {
+            SetStatus(T("Status.AutoStartServiceRepaired"));
+        }
+    }
+
+    private async Task HandleAutoStartWithStoppedServiceAsync(MappingRow row)
+    {
+        var answer = MessageBox.Show(
+            T("Prompt.AutoStartStartService"),
+            T("Title.AutoStart"),
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Question);
+
+        if (answer == MessageBoxResult.Cancel)
+        {
+            RevertAutoStart(row);
+            return;
+        }
+
+        if (answer == MessageBoxResult.No)
+        {
+            if (await SaveMappingsAsync(logSuccess: false))
+            {
+                SetStatus(T("Status.AutoStartSavedServiceStopped"), "warn");
+            }
+            return;
+        }
+
+        if (!await SaveMappingsAsync(logSuccess: false))
+        {
+            return;
+        }
+
+        StopLocalServiceProcesses();
+        await WaitForServiceOfflineAsync(TimeSpan.FromSeconds(8));
+        if (await StartInstalledWindowsServiceElevatedAsync())
+        {
+            SetStatus(T("Status.AutoStartServiceReady"));
+        }
+    }
+
+    private void RevertAutoStart(MappingRow row)
+    {
+        _suppressAutoSave = true;
+        try
+        {
+            row.AutoStart = false;
+        }
+        finally
+        {
+            _suppressAutoSave = false;
+        }
+
+        MappingsGrid.Items.Refresh();
+        SetStatus(TF("Status.AutoStartCanceled", row.Name), "warn");
+    }
+
+    private async Task<bool> StartInstalledWindowsServiceElevatedAsync()
+    {
+        SetStatus(T("Status.WindowsServiceStarting"));
+        if (!await RunServiceCtlElevatedAsync("start", []))
+        {
+            return false;
+        }
+
+        if (await WaitForServiceAsync(TimeSpan.FromSeconds(12)))
+        {
+            await RefreshAsync();
+            SetStatus(T("Status.BackgroundServiceReady"));
+            return true;
+        }
+
+        SetStatus(T("Status.ServiceStartFailed"), "warn");
+        return false;
     }
 
     private async Task UninstallServiceAsync()
@@ -642,12 +893,15 @@ public partial class MainWindow : Window
         DependenciesText.Text += Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
     }
 
-    private async Task<bool> RunServiceCtlElevatedAsync(string action, IReadOnlyList<string> arguments)
+    private async Task<bool> RunServiceCtlElevatedAsync(string action, IReadOnlyList<string> arguments, bool reportFailure = true)
     {
         var cliPath = ResolveCliPath();
         if (cliPath is null)
         {
-            SetStatus(T("Status.ServiceCliNotFound"), "error");
+            if (reportFailure)
+            {
+                SetStatus(T("Status.ServiceCliNotFound"), "error");
+            }
             return false;
         }
 
@@ -681,14 +935,113 @@ public partial class MainWindow : Window
                 return true;
             }
 
-            SetStatus(TF("Status.ServiceControlFailed", action, $"exit code {process.ExitCode}"), "error");
+            if (reportFailure)
+            {
+                SetStatus(TF("Status.ServiceControlFailed", action, $"exit code {process.ExitCode}"), "error");
+            }
             return false;
         }
         catch (Exception ex)
         {
-            SetStatus(TF("Status.ServiceControlFailed", action, ex.Message), "error");
+            if (reportFailure)
+            {
+                SetStatus(TF("Status.ServiceControlFailed", action, ex.Message), "error");
+            }
             return false;
         }
+    }
+
+    private async Task<InstalledWindowsServiceInfo> GetInstalledWindowsServiceInfoAsync()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return new InstalledWindowsServiceInfo(InstalledWindowsServiceState.NotInstalled, null);
+        }
+
+        var query = await RunProcessAsync("sc.exe", ["query", "VComTunnel"]);
+        if (query.ExitCode != 0)
+        {
+            return new InstalledWindowsServiceInfo(InstalledWindowsServiceState.NotInstalled, null);
+        }
+
+        var text = $"{query.Output} {query.Error}";
+        var state = InstalledWindowsServiceState.Installed;
+        if (text.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
+        {
+            state = InstalledWindowsServiceState.Running;
+        }
+        else if (text.Contains("STOPPED", StringComparison.OrdinalIgnoreCase))
+        {
+            state = InstalledWindowsServiceState.Stopped;
+        }
+
+        var config = await RunProcessAsync("sc.exe", ["qc", "VComTunnel"]);
+        var binaryPath = config.ExitCode == 0
+            ? ExtractServiceBinaryPath(config.Output)
+            : null;
+        return new InstalledWindowsServiceInfo(state, binaryPath);
+    }
+
+    private static string? ExtractServiceBinaryPath(string scConfigOutput)
+    {
+        foreach (var line in scConfigOutput.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var nameIndex = line.IndexOf("BINARY_PATH_NAME", StringComparison.OrdinalIgnoreCase);
+            if (nameIndex < 0)
+            {
+                continue;
+            }
+
+            var valueIndex = line.IndexOf(':', nameIndex);
+            if (valueIndex >= 0 && valueIndex + 1 < line.Length)
+            {
+                return line[(valueIndex + 1)..].Trim();
+            }
+        }
+
+        return null;
+    }
+
+    private static bool ServiceBinaryPathMatches(string? registeredPath, string? expectedPath)
+    {
+        var registeredExe = ExtractExecutablePath(registeredPath);
+        var expectedExe = ExtractExecutablePath(expectedPath);
+        if (string.IsNullOrWhiteSpace(registeredExe) || string.IsNullOrWhiteSpace(expectedExe))
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(registeredExe),
+                Path.GetFullPath(expectedExe),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return string.Equals(registeredExe, expectedExe, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static string? ExtractExecutablePath(string? commandLine)
+    {
+        var value = commandLine?.Trim();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        if (value.StartsWith('"'))
+        {
+            var endQuote = value.IndexOf('"', 1);
+            return endQuote > 1 ? value[1..endQuote] : value.Trim('"');
+        }
+
+        var exeIndex = value.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+        return exeIndex >= 0
+            ? value[..(exeIndex + 4)].Trim()
+            : value;
     }
 
     private async Task<bool> TryStartInstalledWindowsServiceAsync()
@@ -698,13 +1051,26 @@ public partial class MainWindow : Window
             return false;
         }
 
-        var query = await RunProcessAsync("sc.exe", ["query", "VComTunnel"]);
-        if (query.ExitCode != 0)
+        var service = await GetInstalledWindowsServiceInfoAsync();
+        if (service.State == InstalledWindowsServiceState.NotInstalled)
         {
             return false;
         }
 
-        if (!query.Output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
+        var expectedServicePath = ResolveServicePath();
+        if (!ServiceBinaryPathMatches(service.BinaryPath, expectedServicePath))
+        {
+            AppendGuiLog(
+                "warn",
+                T("Log.Gui"),
+                TF(
+                    "Status.ServicePathMismatch",
+                    string.IsNullOrWhiteSpace(service.BinaryPath) ? T("Msg.Unknown") : service.BinaryPath,
+                    string.IsNullOrWhiteSpace(expectedServicePath) ? T("Msg.Unknown") : expectedServicePath));
+            return false;
+        }
+
+        if (service.State != InstalledWindowsServiceState.Running)
         {
             ServiceStateText.Text = T("Status.WindowsServiceStarting");
             var start = await RunProcessAsync("sc.exe", ["start", "VComTunnel"]);
@@ -862,20 +1228,35 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task RefreshMappingStatesAsync()
+    private async Task<ServiceStatus?> RefreshMappingStatesAsync()
     {
         var status = await _client.GetFromJsonAsync<ServiceStatus>("/api/status", JsonOptions);
         var stateById = status?.Tunnels.ToDictionary(t => t.Id, StringComparer.OrdinalIgnoreCase)
             ?? new Dictionary<string, TunnelStatus>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in _mappings)
         {
-            row.RunState = stateById.TryGetValue(row.Id, out var tunnel)
-                ? tunnel.State
-                : TunnelRunState.Stopped;
-            row.StateLabel = GuiText.State(_language, row.RunState);
+            row.ApplyServiceStatus(
+                stateById.TryGetValue(row.Id, out var tunnel) ? tunnel : null,
+                _language);
         }
 
         MappingsGrid.Items.Refresh();
+        UpdateMappingCommandState();
+        return status;
+    }
+
+    private string FormatServiceSummary(ServiceStatus? status, int mappingCount)
+    {
+        if (status is null)
+        {
+            return TF("Status.ServiceConnected", mappingCount);
+        }
+
+        var running = status.Tunnels.Count(t => t.State is TunnelRunState.Starting or TunnelRunState.Running);
+        var faulted = status.Tunnels.Count(t => t.State is TunnelRunState.Faulted);
+        return running > 0 || faulted > 0
+            ? TF("Status.ServiceConnectedDetailed", mappingCount, running, faulted)
+            : TF("Status.ServiceConnected", mappingCount);
     }
 
     private static string? ResolveServicePath()
@@ -906,7 +1287,13 @@ public partial class MainWindow : Window
 
     private string BuildOfflineMessage(Exception ex)
     {
-        return TF("Diag.Offline", ex.Message);
+        return TF("Diag.Offline", ServiceEndpoint.DefaultUrl, ex.Message);
+    }
+
+    private static bool IsLocalServiceApiException(Exception ex)
+    {
+        return ex is HttpRequestException or TaskCanceledException
+            || ex.InnerException is HttpRequestException;
     }
 
     private async Task SaveAsync()
@@ -1097,6 +1484,12 @@ public partial class MainWindow : Window
                 await PromptUpdateKmdfDriverAfterProtocolFaultAsync(row, lastError);
             }
         }
+        catch (Exception ex) when (IsLocalServiceApiException(ex))
+        {
+            SetStatus(TF("Status.LocalServiceApiUnavailable", actionLabel, ServiceEndpoint.DefaultUrl, ex.Message), "error");
+            DependenciesText.Text = BuildOfflineMessage(ex) + Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+            ClearComPairsList();
+        }
         catch (Exception ex)
         {
             SetStatus(TF("Status.ActionFailed", actionLabel, ex.Message));
@@ -1111,10 +1504,16 @@ public partial class MainWindow : Window
     private async Task<bool> SaveMappingsAsync(bool logSuccess)
     {
         _savingMappings = true;
+        UpdateMappingCommandState();
         try
         {
             CommitGridEdits();
             NormalizeRowsBeforeSave();
+            if (!await EnsureServiceReadyForWriteAsync(T("Action.Save")))
+            {
+                return false;
+            }
+
             var mappings = _mappings.Select(r => r.ToMapping()).ToList();
             var response = await _client.PutAsJsonAsync("/api/mappings", mappings, JsonOptions);
             var body = await response.Content.ReadAsStringAsync();
@@ -1130,10 +1529,72 @@ public partial class MainWindow : Window
             SetStatus(TF("Status.SaveFailed", body));
             return false;
         }
+        catch (Exception ex) when (IsLocalServiceApiException(ex))
+        {
+            SetStatus(TF("Status.LocalServiceApiUnavailable", T("Action.Save"), ServiceEndpoint.DefaultUrl, ex.Message), "error");
+            DependenciesText.Text = BuildOfflineMessage(ex) + Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+            ClearComPairsList();
+            return false;
+        }
         finally
         {
             _savingMappings = false;
+            UpdateMappingCommandState();
         }
+    }
+
+    private async Task<bool> EnsureServiceReadyForWriteAsync(string actionLabel)
+    {
+        if (await IsServiceReadyAsync())
+        {
+            return true;
+        }
+
+        ServiceStateText.Text = T("Status.ServiceStarting");
+        if (await TryStartInstalledWindowsServiceAsync())
+        {
+            return true;
+        }
+
+        var servicePath = ResolveServicePath();
+        if (servicePath is null)
+        {
+            ServiceStateText.Text = T("Status.ServiceOffline");
+            ClearComPairsList();
+            DependenciesText.Text = T("Diag.ServiceNotFound");
+            DependenciesText.Text += Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+            return false;
+        }
+
+        try
+        {
+            using var _ = Process.Start(new ProcessStartInfo
+            {
+                FileName = servicePath,
+                ArgumentList = { "--console" },
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(servicePath)!
+            });
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.LocalServiceApiUnavailable", actionLabel, ServiceEndpoint.DefaultUrl, ex.Message), "error");
+            DependenciesText.Text = BuildOfflineMessage(ex) + Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+            ClearComPairsList();
+            return false;
+        }
+
+        if (await WaitForServiceAsync(TimeSpan.FromSeconds(10)))
+        {
+            return true;
+        }
+
+        ServiceStateText.Text = T("Status.ServiceOffline");
+        ClearComPairsList();
+        DependenciesText.Text = TF("Diag.StartedButNotReady", servicePath);
+        DependenciesText.Text += Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+        return false;
     }
 
     private void ScheduleAutoSave()
@@ -1150,12 +1611,19 @@ public partial class MainWindow : Window
         _ = AutoSaveAfterDelayAsync(token);
     }
 
+    private void CancelPendingAutoSave()
+    {
+        _autoSaveCts?.Cancel();
+        _autoSaveCts?.Dispose();
+        _autoSaveCts = null;
+    }
+
     private async Task AutoSaveAfterDelayAsync(CancellationToken cancellationToken)
     {
         try
         {
             await Task.Delay(TimeSpan.FromMilliseconds(800), cancellationToken);
-            if (cancellationToken.IsCancellationRequested || !await IsServiceReadyAsync())
+            if (cancellationToken.IsCancellationRequested)
             {
                 return;
             }
@@ -1223,6 +1691,13 @@ public partial class MainWindow : Window
                 return;
             }
 
+            var existingPairs = await RefreshComPairsListAsync(updateDetails: true);
+            if (existingPairs.Any(pair => PairMatchesMapping(pair, row)))
+            {
+                SetStatus(TF("Status.Com0comPairAlreadyExists", row.VisiblePort, row.BackingPort), "warn");
+                return;
+            }
+
             var answer = MessageBox.Show(
                 TF("Prompt.CreatePair", row.VisiblePort, row.BackingPort),
                 T("Title.ComPair"),
@@ -1248,10 +1723,19 @@ public partial class MainWindow : Window
                 return;
             }
 
-            LaunchSetupcPlan(plan);
-            await RefreshComPairsListAsync(updateDetails: true);
+            if (!await RunSetupcPlanAsync(plan, TimeSpan.FromSeconds(60)))
+            {
+                return;
+            }
+
             SetStatus(T("Status.WaitingPairAppear"));
-            _ = PollCom0comPairsAfterSetupcAsync();
+            if (await WaitForPairAsync(row, TimeSpan.FromSeconds(45)))
+            {
+                SetStatus(TF("Status.CreatedPair", row.VisiblePort, row.BackingPort));
+                return;
+            }
+
+            SetStatus(T("Status.PairCreationNotDetected"), "warn");
         }
         catch (Exception ex)
         {
@@ -1342,7 +1826,11 @@ public partial class MainWindow : Window
                 return false;
             }
 
-            LaunchSetupcPlan(plan);
+            if (!await RunSetupcPlanAsync(plan, TimeSpan.FromSeconds(60)))
+            {
+                return false;
+            }
+
             await RefreshComPairsListAsync(updateDetails: true);
             SetStatus(TF("Status.WaitingPairRemoved", pair.PairNumber));
             _ = PollCom0comPairsAfterSetupcAsync(removedPairNumber: pair.PairNumber);
@@ -1355,18 +1843,56 @@ public partial class MainWindow : Window
         }
     }
 
-    private void LaunchSetupcPlan(SetupcCommandPlan plan)
+    private async Task<bool> RunSetupcPlanAsync(SetupcCommandPlan plan, TimeSpan timeout)
     {
-        Process.Start(new ProcessStartInfo
+        try
         {
-            FileName = plan.FileName,
-            Arguments = plan.Arguments,
-            WorkingDirectory = plan.WorkingDirectory ?? Path.GetDirectoryName(plan.FileName) ?? AppContext.BaseDirectory,
-            UseShellExecute = true,
-            Verb = plan.RequiresElevation ? "runas" : ""
-        });
+            SetStatus(TF("Status.SetupcStarting", plan.Arguments));
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = plan.FileName,
+                Arguments = plan.Arguments,
+                WorkingDirectory = plan.WorkingDirectory ?? Path.GetDirectoryName(plan.FileName) ?? AppContext.BaseDirectory,
+                UseShellExecute = true,
+                Verb = plan.RequiresElevation ? "runas" : ""
+            });
+            if (process is null)
+            {
+                SetStatus(T("Status.SetupcStartReturnedNull"), "error");
+                return false;
+            }
 
-        SetStatus(TF("Status.LaunchSetupc", plan.Arguments));
+            using var timeoutCts = new CancellationTokenSource(timeout);
+            try
+            {
+                await process.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                SetStatus(TF("Status.SetupcTimedOut", plan.Arguments, (int)timeout.TotalSeconds), "warn");
+                return false;
+            }
+
+            if (process.ExitCode != 0)
+            {
+                SetStatus(TF("Status.SetupcFailedExit", plan.Arguments, process.ExitCode), "error");
+                return false;
+            }
+
+            SetStatus(TF("Status.SetupcCompleted", plan.Arguments));
+            return true;
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            SetStatus(T("Status.SetupcCanceled"), "warn");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.SetupcLaunchFailed", ex.Message), "error");
+            return false;
+        }
+
     }
 
     private async Task<bool> EnsurePairExistsBeforeStartAsync(MappingRow row)
@@ -1409,7 +1935,11 @@ public partial class MainWindow : Window
             return false;
         }
 
-        LaunchSetupcPlan(plan);
+        if (!await RunSetupcPlanAsync(plan, TimeSpan.FromSeconds(60)))
+        {
+            return false;
+        }
+
         SetStatus(T("Status.WaitingPairAppear"));
         if (await WaitForPairAsync(row, TimeSpan.FromSeconds(45)))
         {
@@ -1437,12 +1967,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var answer = MessageBox.Show(
-            TF("Prompt.CreateKmdfPort", row.VisiblePort),
-            T("Title.KmdfPort"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question);
-        if (answer != MessageBoxResult.Yes)
+        if (!ConfirmKmdfDriverOperation(TF("Prompt.CreateKmdfPort", row.VisiblePort)))
         {
             return;
         }
@@ -1541,12 +2066,7 @@ public partial class MainWindow : Window
 
     private async Task PromptUpdateKmdfDriverAfterProtocolFaultAsync(MappingRow row, string lastError)
     {
-        var answer = MessageBox.Show(
-            TF("Prompt.UpdateKmdfDriverAfterFault", row.VisiblePort, lastError),
-            T("Title.KmdfPort"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-        if (answer != MessageBoxResult.Yes)
+        if (!ConfirmKmdfDriverOperation(TF("Prompt.UpdateKmdfDriverAfterFault", row.VisiblePort, lastError)))
         {
             return;
         }
@@ -1563,12 +2083,7 @@ public partial class MainWindow : Window
         var normalizedPortName = KmdfDeviceManager.NormalizePortName(portName);
         if (confirm)
         {
-            var answer = MessageBox.Show(
-                TF("Prompt.UpdateKmdfDriver", normalizedPortName),
-                T("Title.KmdfPort"),
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (answer != MessageBoxResult.Yes)
+            if (!ConfirmKmdfDriverOperation(TF("Prompt.UpdateKmdfDriver", normalizedPortName)))
             {
                 return false;
             }
@@ -1610,12 +2125,7 @@ public partial class MainWindow : Window
         }
 
         DependenciesText.Text = FormatComPortInventory(await RefreshComPairsListAsync(updateDetails: false), devices);
-        var answer = MessageBox.Show(
-            TF("Prompt.MissingKmdfPort", row.VisiblePort),
-            T("Title.KmdfPort"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question);
-        if (answer != MessageBoxResult.Yes)
+        if (!ConfirmKmdfDriverOperation(TF("Prompt.MissingKmdfPort", row.VisiblePort)))
         {
             SetStatus(TF("Status.StartCanceledMissingKmdfPort", row.VisiblePort), "warn");
             return false;
@@ -1637,6 +2147,17 @@ public partial class MainWindow : Window
 
         SetStatus(wait.FailureMessage ?? TF("Status.KmdfPortCreationNotDetected", row.VisiblePort), "warn");
         return false;
+    }
+
+    private bool ConfirmKmdfDriverOperation(string operationPrompt)
+    {
+        var message = $"{operationPrompt.TrimEnd()}\r\n\r\n{T("Prompt.KmdfExperimentalDriverWarning")}";
+        var answer = MessageBox.Show(
+            message,
+            T("Title.KmdfPort"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+        return answer == MessageBoxResult.Yes;
     }
 
     private KmdfCtlLaunch? LaunchKmdfCtl(string action, string portName)
@@ -1906,6 +2427,31 @@ public partial class MainWindow : Window
         MappingsGrid.Items.Refresh();
     }
 
+    private int NextDefaultComPortNumber()
+    {
+        var used = new HashSet<int>();
+        foreach (var row in _mappings)
+        {
+            AddPortNumber(used, row.VisiblePort);
+            AddPortNumber(used, row.BackingPort);
+        }
+
+        foreach (var port in new WindowsComPortInventory().GetRegisteredPortNames())
+        {
+            AddPortNumber(used, port);
+        }
+
+        for (var portNumber = 12; portNumber < 256; portNumber++)
+        {
+            if (!used.Contains(portNumber))
+            {
+                return portNumber;
+            }
+        }
+
+        return 12 + _mappings.Count;
+    }
+
     private static bool TryGetComPortNumber(string? port, out int portNumber)
     {
         portNumber = 0;
@@ -1913,6 +2459,14 @@ public partial class MainWindow : Window
             && port.StartsWith("COM", StringComparison.OrdinalIgnoreCase)
             && int.TryParse(port[3..], out portNumber)
             && portNumber > 0;
+    }
+
+    private static void AddPortNumber(ISet<int> ports, string? port)
+    {
+        if (TryGetComPortNumber(port, out var portNumber))
+        {
+            ports.Add(portNumber);
+        }
     }
 
     private async Task<bool> IsServiceDependencyStateStaleAsync()
@@ -1931,9 +2485,16 @@ public partial class MainWindow : Window
 
     private async Task SetupDependenciesAsync()
     {
+        if (_dependencySetupActive)
+        {
+            return;
+        }
+
         try
         {
+            SetDependencySetupActive(true);
             ServiceStateText.Text = T("Status.ServiceChecking");
+            SetStatus(T("Status.DependencySetupRunning"));
             var localReport = new DependencyDetector().Detect();
             DependenciesText.Text = FormatDependencies(localReport);
             if (localReport.IsReadyForCom0comHub4com)
@@ -1994,6 +2555,13 @@ public partial class MainWindow : Window
         {
             SetStatus(TF("Status.DependencySetupFailed", ex.Message));
         }
+        finally
+        {
+            if (!_dependencyPollActive)
+            {
+                SetDependencySetupActive(false);
+            }
+        }
     }
 
     private void LaunchCom0comInstaller()
@@ -2033,6 +2601,7 @@ public partial class MainWindow : Window
         }
 
         _dependencyPollActive = true;
+        SetDependencySetupActive(true);
         try
         {
             var deadline = DateTimeOffset.UtcNow.AddMinutes(3);
@@ -2068,7 +2637,17 @@ public partial class MainWindow : Window
         finally
         {
             _dependencyPollActive = false;
+            SetDependencySetupActive(false);
         }
+    }
+
+    private void SetDependencySetupActive(bool active)
+    {
+        _dependencySetupActive = active;
+        DependencyProgressPanel.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        DependencyProgressBar.IsIndeterminate = active;
+        DependencyProgressText.Text = active ? T("Status.DependencySetupRunning") : "";
+        UpdateMappingCommandState();
     }
 
     private async Task RefreshLogsAsync()
@@ -2332,10 +2911,13 @@ public sealed class MappingRow : INotifyPropertyChanged
 {
     private string _backend = "com0comHub4com";
     private string? _backingPort;
+    private bool _autoStart;
     private TunnelRunState _runState = TunnelRunState.Stopped;
     private string _stateLabel = "";
+    private string _serviceLabel = "";
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    public event EventHandler? AutoStartEnabledRequested;
 
     public string Id { get; set; } = Guid.NewGuid().ToString("n");
     public string Name { get; set; } = "";
@@ -2380,8 +2962,29 @@ public sealed class MappingRow : INotifyPropertyChanged
 
     public string Host { get; set; } = "";
     public int Port { get; set; }
-    public bool AutoStart { get; set; }
+    public bool AutoStart
+    {
+        get => _autoStart;
+        set
+        {
+            if (_autoStart == value)
+            {
+                return;
+            }
+
+            var enabled = !_autoStart && value;
+            _autoStart = value;
+            OnPropertyChanged(nameof(AutoStart));
+            if (enabled)
+            {
+                AutoStartEnabledRequested?.Invoke(this, EventArgs.Empty);
+            }
+        }
+    }
     public bool RestartOnFailure { get; set; } = true;
+    public int? ProcessId { get; private set; }
+    public DateTimeOffset? StartedAt { get; private set; }
+    public string? LastError { get; private set; }
 
     public TunnelRunState RunState
     {
@@ -2415,6 +3018,21 @@ public sealed class MappingRow : INotifyPropertyChanged
         }
     }
 
+    public string ServiceLabel
+    {
+        get => _serviceLabel;
+        private set
+        {
+            if (string.Equals(_serviceLabel, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _serviceLabel = value;
+            OnPropertyChanged(nameof(ServiceLabel));
+        }
+    }
+
     public bool IsKmdf => string.Equals(Backend, "kmdf", StringComparison.OrdinalIgnoreCase);
     public bool CanStart => RunState is not TunnelRunState.Running and not TunnelRunState.Starting and not TunnelRunState.Unsupported;
     public bool CanStop => RunState is TunnelRunState.Running or TunnelRunState.Starting;
@@ -2438,6 +3056,30 @@ public sealed class MappingRow : INotifyPropertyChanged
             AutoStart = mapping.AutoStart,
             RestartOnFailure = mapping.RestartOnFailure,
             RunState = TunnelRunState.Stopped
+        };
+    }
+
+    public void ApplyServiceStatus(TunnelStatus? status, UiLanguage language)
+    {
+        ProcessId = status?.ProcessId;
+        StartedAt = status?.StartedAt;
+        LastError = status?.LastError;
+        RunState = status?.State ?? TunnelRunState.Stopped;
+        StateLabel = GuiText.State(language, RunState);
+        RefreshServiceLabel(language);
+    }
+
+    public void RefreshServiceLabel(UiLanguage language)
+    {
+        ServiceLabel = RunState switch
+        {
+            TunnelRunState.Running when ProcessId is not null => GuiText.Format(language, "Mapping.ServiceRunningPid", ProcessId),
+            TunnelRunState.Running => GuiText.Get(language, "Mapping.ServiceRunning"),
+            TunnelRunState.Starting => GuiText.Get(language, "Mapping.ServiceStarting"),
+            TunnelRunState.Faulted when !string.IsNullOrWhiteSpace(LastError) => GuiText.Format(language, "Mapping.ServiceFaulted", Shorten(CollapseWhitespace(LastError!), 160)),
+            TunnelRunState.Faulted => GuiText.Get(language, "Mapping.ServiceFaultedUnknown"),
+            TunnelRunState.Unsupported => GuiText.Get(language, "Mapping.ServiceUnsupported"),
+            _ => ""
         };
     }
 
@@ -2479,6 +3121,12 @@ public sealed class MappingRow : INotifyPropertyChanged
         OnPropertyChanged(nameof(BackingPort));
         return true;
     }
+
+    private static string CollapseWhitespace(string text) =>
+        string.Join(" ", text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private static string Shorten(string text, int maxLength) =>
+        text.Length <= maxLength ? text : text[..Math.Max(0, maxLength - 3)] + "...";
 }
 
 internal sealed record KmdfCtlLaunch(string ResultFile);
@@ -2488,6 +3136,16 @@ internal sealed record KmdfCtlResult(bool Success, string Message);
 internal sealed record KmdfWaitResult(bool Success, string? FailureMessage);
 
 internal sealed record ProcessRunResult(int ExitCode, string Output, string Error);
+
+internal sealed record InstalledWindowsServiceInfo(InstalledWindowsServiceState State, string? BinaryPath);
+
+internal enum InstalledWindowsServiceState
+{
+    NotInstalled,
+    Installed,
+    Stopped,
+    Running
+}
 
 internal sealed record MappingPortTarget(Com0comPairInfo? Com0comPair, KmdfDeviceInfo? KmdfDevice, string Description)
 {

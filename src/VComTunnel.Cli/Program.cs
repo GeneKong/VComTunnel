@@ -7,9 +7,6 @@ return exitCode;
 internal static class VComTunnelCtl
 {
     private const string ServiceName = "VComTunnel";
-    private const string DefaultServiceBaseUrl = "http://127.0.0.1:44817";
-    private static string ServiceBaseUrl =>
-        Environment.GetEnvironmentVariable("VCOMTUNNEL_SERVICE_URL") ?? DefaultServiceBaseUrl;
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -114,17 +111,24 @@ internal static class VComTunnelCtl
 
     private static async Task<int> GetAsync(string path)
     {
-        using var client = new HttpClient { BaseAddress = new Uri(ServiceBaseUrl) };
-        try
+        if (!TryCreateServiceClient(out var client, out var serviceBaseUrl))
         {
-            var response = await client.GetAsync(path);
-            Console.WriteLine(await response.Content.ReadAsStringAsync());
-            return response.IsSuccessStatusCode ? 0 : 2;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Service is not reachable at {ServiceBaseUrl}: {ex.Message}");
             return 2;
+        }
+
+        using (client)
+        {
+            try
+            {
+                var response = await client.GetAsync(path);
+                Console.WriteLine(await response.Content.ReadAsStringAsync());
+                return response.IsSuccessStatusCode ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Service is not reachable at {serviceBaseUrl}: {ex.Message}");
+                return 2;
+            }
         }
     }
 
@@ -136,17 +140,24 @@ internal static class VComTunnelCtl
             return 2;
         }
 
-        using var client = new HttpClient { BaseAddress = new Uri(ServiceBaseUrl) };
-        try
+        if (!TryCreateServiceClient(out var client, out var serviceBaseUrl))
         {
-            var response = await client.PostAsync($"/api/mappings/{id}/{action}", null);
-            Console.WriteLine(await response.Content.ReadAsStringAsync());
-            return response.IsSuccessStatusCode ? 0 : 2;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Service is not reachable at {ServiceBaseUrl}: {ex.Message}");
             return 2;
+        }
+
+        using (client)
+        {
+            try
+            {
+                var response = await client.PostAsync($"/api/mappings/{id}/{action}", null);
+                Console.WriteLine(await response.Content.ReadAsStringAsync());
+                return response.IsSuccessStatusCode ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Service is not reachable at {serviceBaseUrl}: {ex.Message}");
+                return 2;
+            }
         }
     }
 
@@ -163,17 +174,41 @@ internal static class VComTunnelCtl
 
     private static async Task<int> PairPlanAsync(string path)
     {
-        using var client = new HttpClient { BaseAddress = new Uri(ServiceBaseUrl) };
+        if (!TryCreateServiceClient(out var client, out var serviceBaseUrl))
+        {
+            return 2;
+        }
+
+        using (client)
+        {
+            try
+            {
+                var response = await client.PostAsync(path, null);
+                Console.WriteLine(await response.Content.ReadAsStringAsync());
+                return response.IsSuccessStatusCode ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Service is not reachable at {serviceBaseUrl}: {ex.Message}");
+                return 2;
+            }
+        }
+    }
+
+    private static bool TryCreateServiceClient(out HttpClient client, out string serviceBaseUrl)
+    {
         try
         {
-            var response = await client.PostAsync(path, null);
-            Console.WriteLine(await response.Content.ReadAsStringAsync());
-            return response.IsSuccessStatusCode ? 0 : 2;
+            serviceBaseUrl = ServiceEndpoint.GetBaseUrl();
+            client = new HttpClient { BaseAddress = new Uri(serviceBaseUrl) };
+            return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is InvalidOperationException or UriFormatException)
         {
-            Console.WriteLine($"Service is not reachable at {ServiceBaseUrl}: {ex.Message}");
-            return 2;
+            serviceBaseUrl = "";
+            client = null!;
+            Console.WriteLine(ex.Message);
+            return false;
         }
     }
 
@@ -402,9 +437,22 @@ internal static class VComTunnelCtl
             return 2;
         }
 
+        if (IsServiceInstalled())
+        {
+            Console.WriteLine("Updating existing Windows service through sc.exe.");
+            Console.WriteLine($"Service path: {servicePath}");
+            return RunSc("config", ServiceName, "binPath=", servicePath, "start=", "auto", "DisplayName=", "VComTunnel");
+        }
+
         Console.WriteLine("Installing Windows service through sc.exe.");
         Console.WriteLine("The service app can also be run directly for console-mode debugging.");
         return RunSc("create", ServiceName, "binPath=", servicePath, "start=", "auto", "DisplayName=", "VComTunnel");
+    }
+
+    private static bool IsServiceInstalled()
+    {
+        var result = RunScCapture("query", ServiceName);
+        return result.ExitCode == 0;
     }
 
     private static string? ResolveServiceExe(string? explicitServicePath)
@@ -448,6 +496,36 @@ internal static class VComTunnelCtl
         return process.ExitCode;
     }
 
+    private static ScResult RunScCapture(params string[] args)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "sc.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        foreach (var arg in args)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
+        using var process = Process.Start(startInfo);
+        if (process is null)
+        {
+            return new ScResult(1, "", "Could not start sc.exe.");
+        }
+
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return new ScResult(process.ExitCode, output, error);
+    }
+
+    private sealed record ScResult(int ExitCode, string Output, string Error);
+
     private static int Help()
     {
         Console.WriteLine("""
@@ -462,9 +540,9 @@ internal static class VComTunnelCtl
           pair create-plan <id>    Print setupc plan for one mapping
           pair remove-plan <n>     Print setupc remove plan for pair number n
           kmdf list                List VComTunnel KMDF COM ports
-          kmdf add COMx [inf]      Create a KMDF COM port with administrator approval
+          kmdf add COMx [inf]      Create an experimental KMDF COM port with administrator approval
           kmdf remove COMx         Remove a KMDF COM port with administrator approval
-          kmdf update COMx [inf]   Update an existing KMDF COM port driver
+          kmdf update COMx [inf]   Update an existing experimental KMDF COM port driver
           start <mappingId>        Start one configured mapping
           stop <mappingId>         Stop one configured mapping
           logs                     Read /api/logs from the local service
@@ -499,6 +577,7 @@ internal static class VComTunnelCtl
     private static int KmdfHelp()
     {
         Console.WriteLine("Usage: vcomtunnelctl kmdf list | add COM27 [driver-inf] | remove COM27 | update COM27 [driver-inf] | inf [driver-inf]");
+        Console.WriteLine(KmdfDeviceManager.TestSignedDriverPolicyHint);
         return 0;
     }
 

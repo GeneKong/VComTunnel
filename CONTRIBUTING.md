@@ -26,10 +26,14 @@ Run the managed build and tests before sending changes:
 
 ```powershell
 dotnet restore VComTunnel.sln
-dotnet build VComTunnel.sln --no-restore
-dotnet run --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj --no-restore
-powershell -ExecutionPolicy Bypass -File scripts\smoke-local.ps1
+dotnet build -c Release --no-restore VComTunnel.sln
+dotnet run -c Release --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
+powershell -ExecutionPolicy Bypass -File scripts\smoke-local.ps1 -Configuration Release -NoBuild
 ```
+
+The smoke script starts its own console-mode service on a temporary loopback
+port and uses a temporary `VCOMTUNNEL_HOME`, so it does not require stopping an
+installed VComTunnel service first.
 
 For RFC2217 protocol work, prefer the fake server probe before touching real
 hardware:

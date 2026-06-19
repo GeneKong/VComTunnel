@@ -11,6 +11,8 @@ public sealed class KmdfDeviceManager
 {
     public const string HardwareId = @"Root\VComTunnelSerial";
     public const string DeviceName = "VComTunnel Virtual Serial Port";
+    public const string TestSignedDriverPolicyHint =
+        "VComTunnel.Serial is experimental and is not a production-signed driver package. Windows may require Test Mode and a reboot; Secure Boot or driver signing policy can block installation.";
 
     private static readonly Guid PortsClassGuid = new("4D36E978-E325-11CE-BFC1-08002BE10318");
     private static readonly Regex PortRegex = new(@"\((COM\d+)\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -77,7 +79,7 @@ public sealed class KmdfDeviceManager
         try
         {
             var instanceId = SetupApiCreateRootDevice(portName);
-            var rebootRequired = InstallDriverForDevice(infPath);
+            var rebootRequired = InstallDriverForDeviceWithPolicyHint(infPath);
             RestartDevice(instanceId);
 
             var created = GetDevices().FirstOrDefault(device => PortEquals(device.PortName, portName))
@@ -158,7 +160,7 @@ public sealed class KmdfDeviceManager
 
         try
         {
-            var rebootRequired = InstallDriverForDevice(infPath);
+            var rebootRequired = InstallDriverForDeviceWithPolicyHint(infPath);
             RestartDevice(device.InstanceId);
             var updated = GetDevices().FirstOrDefault(candidate => string.Equals(candidate.InstanceId, device.InstanceId, StringComparison.OrdinalIgnoreCase))
                 ?? GetDevices().FirstOrDefault(candidate => PortEquals(candidate.PortName, device.PortName))
@@ -265,6 +267,18 @@ public sealed class KmdfDeviceManager
         }
 
         return rebootRequired;
+    }
+
+    private static bool InstallDriverForDeviceWithPolicyHint(string infPath)
+    {
+        try
+        {
+            return InstallDriverForDevice(infPath);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"VComTunnel.Serial driver install failed: {ex.Message} {TestSignedDriverPolicyHint}", ex);
+        }
     }
 
     private static string SetupApiCreateRootDevice(string portName)

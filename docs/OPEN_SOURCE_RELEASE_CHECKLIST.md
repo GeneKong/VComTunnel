@@ -25,9 +25,10 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
 
 ## Build Validation
 
-- Run `dotnet build VComTunnel.sln`.
-- Run `dotnet run --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj`.
-- Run `scripts\smoke-local.ps1`.
+- Run `dotnet restore VComTunnel.sln`.
+- Run `dotnet build -c Release --no-restore VComTunnel.sln`.
+- Run `dotnet run -c Release --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj`.
+- Run `scripts\smoke-local.ps1 -Configuration Release -NoBuild`.
 - Run the fake-server RFC2217 probe.
 - For release packaging, run `scripts\package-release.ps1` with a reviewed
   dependency archive cache when repeatability matters.
@@ -59,14 +60,16 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
 
 ## Release Artifacts
 
-- Confirm the public artifact name ends in `portable` for the default
+- Confirm every public GitHub Release asset name includes the release version,
+  for example `VComTunnel-1.0.0.rc2-win-x64-Setup.exe`.
+- Confirm the public artifact name includes `portable` for the default
   self-contained user download.
 - Confirm `README-FIRST.txt` and `README-FIRST.zh-CN.txt` are generated.
 - Confirm `Start-VComTunnel-Portable.cmd` launches the GUI from an extracted
   writable folder and keeps app data under the package `data` directory.
 - Confirm `Setup-Dependencies-Portable.cmd` uses bundled dependency archives
-  when present and still leaves com0com driver installation to an elevated
-  user approval.
+  when present, rejects invalid archives, and still leaves com0com driver
+  installation to an elevated user approval.
 - Confirm `Install-Windows-Service.cmd` and `Uninstall-Windows-Service.cmd`
   elevate through UAC and call `vcomtunnelctl service ...` instead of requiring
   users to type `sc.exe` commands.
@@ -76,10 +79,14 @@ windows, serial-port, virtual-com-port, rfc2217, dotnet, wpf, kmdf, com0com, hub
 - Confirm `SHA256SUMS.txt` is generated in the package.
 - Confirm the package can run without runtime network downloads when dependency
   archives are bundled.
+- Confirm GitHub tag packaging bundles the pinned `third_party/dependencies`
+  archives by default and validates their SHA256 values before publishing.
+- Confirm release versions containing `rc`, `alpha`, `beta`, `pre`, or
+  `preview` are marked as GitHub pre-releases.
 - Confirm the Velopack installer keeps com0com driver setup explicit and does
   not silently install drivers or the experimental KMDF prototype.
-- Confirm GitHub Actions artifacts include the Velopack release directory and
-  the staged portable zip.
+- Confirm GitHub Actions artifacts include only versioned public release assets
+  from `artifacts\github-release\public\<runtime>`.
 - Confirm generated installer/update assets are not committed to source
   control.
 - Publish release notes that identify the stable backend path and experimental

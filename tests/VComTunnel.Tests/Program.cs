@@ -12,6 +12,9 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("invalid host and port are rejected", () => Task.Run(InvalidHostAndPortAreRejected)),
     ("COM backing port is accepted", () => Task.Run(ComBackingPortIsAccepted)),
     ("config round trip", ConfigRoundTripAsync),
+    ("service endpoint defaults to loopback", () => Task.Run(ServiceEndpointDefaultsToLoopback)),
+    ("service endpoint accepts loopback override", () => Task.Run(ServiceEndpointAcceptsLoopbackOverride)),
+    ("service endpoint rejects non-loopback override", () => Task.Run(ServiceEndpointRejectsNonLoopbackOverride)),
     ("com0com create hints", () => Task.Run(Com0comCreateHints)),
     ("com0com service maps peer modem signals", () => Task.Run(Com0comServiceMapsPeerModemSignals)),
     ("esptool baud monitor waits for response", () => Task.Run(EspToolBaudMonitorWaitsForResponse)),
@@ -38,9 +41,12 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("KMDF permanent driver faults do not restart", KmdfPermanentDriverFaultDoesNotRestartAsync),
     ("fake com2tcp process starts and stops", FakeCom2TcpProcessStartsAndStopsAsync),
     ("fake com2tcp process restarts after exit", FakeCom2TcpProcessRestartsAfterExitAsync),
+    ("fake com2tcp access denied does not restart", FakeCom2TcpAccessDeniedDoesNotRestartAsync),
     ("manual stop suppresses fake com2tcp restart", ManualStopSuppressesFakeCom2TcpRestartAsync),
     ("dependency installer extracts tool zips", DependencyInstallerExtractsToolZipsAsync),
     ("dependency installer uses bundled release archives", DependencyInstallerUsesBundledReleaseArchivesAsync),
+    ("dependency installer falls back after invalid mirror", DependencyInstallerFallsBackAfterInvalidMirrorAsync),
+    ("dependency installer rejects HTML downloads", DependencyInstallerRejectsHtmlDownloadsAsync),
     ("API client uses service JSON contract", ApiClientUsesServiceJsonContractAsync),
     ("API client surfaces service errors", ApiClientSurfacesServiceErrorsAsync)
 };
@@ -162,6 +168,56 @@ static async Task ConfigRoundTripAsync()
     AssertEqual("RoundTrip", loaded.Mappings.Single().Name);
     AssertEqual("COM33", loaded.Mappings.Single().VisiblePort);
     AssertTrue(loaded.Mappings.Single().AutoStart, "AutoStart should round-trip.");
+}
+
+static void ServiceEndpointDefaultsToLoopback()
+{
+    var oldUrl = Environment.GetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable);
+    Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, null);
+    try
+    {
+        AssertEqual(ServiceEndpoint.DefaultUrl, ServiceEndpoint.GetBaseUrl());
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, oldUrl);
+    }
+}
+
+static void ServiceEndpointAcceptsLoopbackOverride()
+{
+    var oldUrl = Environment.GetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable);
+    Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, "http://localhost:44999/");
+    try
+    {
+        AssertEqual("http://localhost:44999", ServiceEndpoint.GetBaseUrl());
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, oldUrl);
+    }
+}
+
+static void ServiceEndpointRejectsNonLoopbackOverride()
+{
+    var oldUrl = Environment.GetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable);
+    Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, "http://192.0.2.1:44817");
+    try
+    {
+        try
+        {
+            _ = ServiceEndpoint.GetBaseUrl();
+            throw new Exception("Expected non-loopback service URL to be rejected.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            AssertStringContains(ex.Message, "loopback");
+        }
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(ServiceEndpoint.EnvironmentVariable, oldUrl);
+    }
 }
 
 static void Com0comCreateHints()
@@ -918,21 +974,20 @@ static async Task KmdfMappingReportsStartupFaultAsync()
 
     var status = await orchestrator.StartAsync((await store.LoadAsync()).Mappings.Single().Id);
     AssertEqual(TunnelRunState.Faulted.ToString(), status.State.ToString());
-    AssertStringContainsAny(status.LastError ?? "",
+    var acceptedStartupFaults = new[]
+    {
         "Could not open KMDF control channel",
         "KMDF driver protocol",
         "Could not connect to RFC2217 endpoint",
+        "The requested resource is in use",
         "请求的资源在使用中",
-        "resource is in use");
+        "resource is in use"
+    };
+    AssertStringContainsAny(status.LastError ?? "", acceptedStartupFaults);
 
     var secondStatus = await orchestrator.StartAsync((await store.LoadAsync()).Mappings.Single().Id);
     AssertEqual(TunnelRunState.Faulted.ToString(), secondStatus.State.ToString());
-    AssertStringContainsAny(secondStatus.LastError ?? "",
-        "Could not open KMDF control channel",
-        "KMDF driver protocol",
-        "Could not connect to RFC2217 endpoint",
-        "请求的资源在使用中",
-        "resource is in use");
+    AssertStringContainsAny(secondStatus.LastError ?? "", acceptedStartupFaults);
 }
 
 static async Task KmdfSessionRestartsAfterNetworkFaultAsync()
@@ -1048,7 +1103,7 @@ static async Task Com0comCreateAndRemovePlansAsync()
     var manager = new Com0comSetupManager(
         store,
         detector,
-        new FakeComPortInventory(["COM29", "CNCB29"], [new Com0comPairInfo(2, "COM29", "CNCB29", @"\Device\com0com12", @"\Device\com0com22", true)]));
+        new FakeComPortInventory(["COM28", "CNCB28"], [new Com0comPairInfo(2, "COM28", "CNCB28", @"\Device\com0com12", @"\Device\com0com22", true)]));
 
     var create = await manager.BuildCreatePlanAsync("hub");
     AssertStringContains(create.Arguments, "install PortName=COM29 PortName=CNCB29");
@@ -1060,6 +1115,20 @@ static async Task Com0comCreateAndRemovePlansAsync()
     var remove = manager.BuildRemovePlan(2);
     AssertStringContains(remove.Arguments, "remove 2");
     AssertEqual(1.ToString(), manager.GetPairs().Count.ToString());
+
+    var existingManager = new Com0comSetupManager(
+        store,
+        detector,
+        new FakeComPortInventory(["COM29", "CNCB29"], [new Com0comPairInfo(3, "COM29", "CNCB29", @"\Device\com0com13", @"\Device\com0com23", true)]));
+    try
+    {
+        await existingManager.BuildCreatePlanAsync("hub");
+        throw new Exception("Existing com0com pair should not produce a create plan.");
+    }
+    catch (InvalidOperationException ex)
+    {
+        AssertStringContains(ex.Message, "already exists");
+    }
 }
 
 static async Task FakeCom2TcpProcessStartsAndStopsAsync()
@@ -1129,6 +1198,50 @@ static async Task FakeCom2TcpProcessRestartsAfterExitAsync()
     var status = orchestrator.GetStatus().Tunnels.Single(t => t.Id == id);
     AssertEqual(TunnelRunState.Running.ToString(), status.State.ToString());
     orchestrator.Stop(id);
+}
+
+static async Task FakeCom2TcpAccessDeniedDoesNotRestartAsync()
+{
+    using var temp = new TempDir();
+    CreateFakeDependencies(
+        temp.Path,
+        """
+        @echo off
+        echo ComIo::OpenPath(): CreateFile("\\.\CNCB58") ERROR 5 - Access is denied. 1>&2
+        exit /b 0
+        """);
+    var mapping = new TunnelMapping
+    {
+        Name = "Busy fake bridge",
+        VisiblePort = "COM58",
+        BackingPort = "CNCB58",
+        Host = "127.0.0.1",
+        Port = 2217,
+        RestartOnFailure = true
+    };
+    var store = await StoreWithMappingAsync(temp.Path, mapping);
+    var log = new InMemoryLog();
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        [],
+        restartDelay: TimeSpan.FromMilliseconds(50));
+    var id = (await store.LoadAsync()).Mappings.Single().Id;
+
+    var started = await orchestrator.StartAsync(id);
+    AssertEqual(TunnelRunState.Faulted.ToString(), started.State.ToString());
+    AssertStringContains(started.LastError ?? "", "ERROR 5");
+    AssertStringContains(started.LastError ?? "", "already open");
+    await Task.Delay(300);
+
+    var status = orchestrator.GetStatus().Tunnels.Single(t => t.Id == id);
+    AssertEqual(TunnelRunState.Faulted.ToString(), status.State.ToString());
+    AssertStringContains(status.LastError ?? "", "ERROR 5");
+    AssertStringContains(status.LastError ?? "", "already open");
+    AssertEqual(
+        "1",
+        log.Snapshot().Count(e => e.Message.Contains("Started hub4com process", StringComparison.OrdinalIgnoreCase)).ToString());
 }
 
 static async Task ManualStopSuppressesFakeCom2TcpRestartAsync()
@@ -1210,7 +1323,12 @@ static async Task DependencyInstallerUsesBundledReleaseArchivesAsync()
             new Dictionary<string, string> { ["hub4com.exe"] = "", ["com2tcp-rfc2217.bat"] = "@echo off" });
         CreateZip(
             Path.Combine(archiveRoot, DependencyInstaller.Com0comArchiveName),
-            new Dictionary<string, string> { ["Setup_com0com_v3.0.0.0_W7_x64_signed.exe"] = "", ["Setup_com0com_v3.0.0.0_W7_x86_signed.exe"] = "" });
+            new Dictionary<string, string>
+            {
+                ["setupc.exe"] = "",
+                ["Setup_com0com_v3.0.0.0_W7_x64_signed.exe"] = "",
+                ["Setup_com0com_v3.0.0.0_W7_x86_signed.exe"] = ""
+            });
 
         var http = new HttpClient(new ThrowingHandler());
         var detector = new DependencyDetector([AppPaths.ToolsDirectory], pathOverride: "");
@@ -1226,6 +1344,62 @@ static async Task DependencyInstallerUsesBundledReleaseArchivesAsync()
     {
         Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", oldHome);
         Environment.SetEnvironmentVariable(DependencyInstaller.BundledDependencyArchiveDirectoryVariable, oldArchiveRoot);
+    }
+}
+
+static async Task DependencyInstallerFallsBackAfterInvalidMirrorAsync()
+{
+    using var temp = new TempDir();
+    var oldHome = Environment.GetEnvironmentVariable("VCOMTUNNEL_HOME");
+    Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", temp.Path);
+    try
+    {
+        var handler = new InvalidThenZipHandler();
+        var http = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://example.invalid/")
+        };
+        var detector = new DependencyDetector([AppPaths.ToolsDirectory], pathOverride: "");
+        var installer = new DependencyInstaller(detector, http);
+        var result = await installer.InstallAsync(new DependencyInstallRequest(DownloadCom0com: false));
+
+        var step = result.Steps.Single();
+        AssertTrue(step.Success, step.Message);
+        AssertTrue(handler.RequestCount >= 2, "Installer should try the next dependency URL after an invalid archive.");
+        AssertStringContains(step.Message, "Downloaded from");
+        AssertTrue(File.Exists(Path.Combine(AppPaths.ToolsDirectory, "hub4com", "com2tcp-rfc2217.bat")), "hub4com batch should be extracted after fallback.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", oldHome);
+    }
+}
+
+static async Task DependencyInstallerRejectsHtmlDownloadsAsync()
+{
+    using var temp = new TempDir();
+    var oldHome = Environment.GetEnvironmentVariable("VCOMTUNNEL_HOME");
+    Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", temp.Path);
+    try
+    {
+        var http = new HttpClient(new HtmlDownloadHandler())
+        {
+            BaseAddress = new Uri("https://example.invalid/")
+        };
+        var detector = new DependencyDetector([AppPaths.ToolsDirectory], pathOverride: "");
+        var installer = new DependencyInstaller(detector, http);
+        var result = await installer.InstallAsync(new DependencyInstallRequest(DownloadCom0com: false));
+
+        var step = result.Steps.Single();
+        AssertTrue(!step.Success, "HTML download should not be accepted as a dependency archive.");
+        AssertStringContains(step.Message, "not a valid zip");
+        AssertTrue(!Directory.Exists(Path.Combine(AppPaths.ToolsDirectory, "hub4com"))
+            || !Directory.EnumerateFiles(Path.Combine(AppPaths.ToolsDirectory, "hub4com"), "com2tcp-rfc2217.bat", SearchOption.AllDirectories).Any(),
+            "Invalid downloads should not produce usable hub4com tools.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("VCOMTUNNEL_HOME", oldHome);
     }
 }
 
@@ -1478,7 +1652,12 @@ internal sealed class ZipHandler : HttpMessageHandler
         var isHub4com = request.RequestUri?.ToString().Contains("hub4com", StringComparison.OrdinalIgnoreCase) == true;
         var files = isHub4com
             ? new Dictionary<string, string> { ["hub4com.exe"] = "", ["com2tcp-rfc2217.bat"] = "@echo off" }
-            : new Dictionary<string, string> { ["Setup_com0com_v3.0.0.0_W7_x64_signed.exe"] = "", ["Setup_com0com_v3.0.0.0_W7_x86_signed.exe"] = "" };
+            : new Dictionary<string, string>
+            {
+                ["setupc.exe"] = "",
+                ["Setup_com0com_v3.0.0.0_W7_x64_signed.exe"] = "",
+                ["Setup_com0com_v3.0.0.0_W7_x86_signed.exe"] = ""
+            };
 
         var stream = new MemoryStream();
         using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
@@ -1527,6 +1706,57 @@ internal sealed class RecordingApiHandler : HttpMessageHandler
         }
 
         return _handle(request);
+    }
+}
+
+internal sealed class HtmlDownloadHandler : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("<!doctype html><html><body>download page</body></html>")
+        };
+        return Task.FromResult(response);
+    }
+}
+
+internal sealed class InvalidThenZipHandler : HttpMessageHandler
+{
+    public int RequestCount { get; private set; }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        RequestCount++;
+        if (RequestCount == 1)
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("<!doctype html><html><body>mirror page</body></html>")
+            });
+        }
+
+        var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var exe = archive.CreateEntry("hub4com.exe");
+            using (var writer = new StreamWriter(exe.Open()))
+            {
+                writer.Write("");
+            }
+
+            var batch = archive.CreateEntry("com2tcp-rfc2217.bat");
+            using (var writer = new StreamWriter(batch.Open()))
+            {
+                writer.Write("@echo off");
+            }
+        }
+
+        stream.Position = 0;
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream)
+        });
     }
 }
 

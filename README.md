@@ -63,9 +63,10 @@ running tunnels; stop mappings from the GUI or with `vcomtunnelctl stop`.
 ## Build
 
 ```powershell
-dotnet build VComTunnel.sln
-dotnet run --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
-scripts\smoke-local.ps1
+dotnet restore VComTunnel.sln
+dotnet build -c Release --no-restore VComTunnel.sln
+dotnet run -c Release --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
+powershell -ExecutionPolicy Bypass -File scripts\smoke-local.ps1 -Configuration Release -NoBuild
 ```
 
 The `dev/avalonia-gui` branch also contains an experimental cross-platform
@@ -81,6 +82,9 @@ scripts\smoke-avalonia-linux-wsl.ps1
 
 See [docs/AVALONIA_GUI.md](docs/AVALONIA_GUI.md) for the current
 multi-platform GUI boundary and WSL validation notes.
+
+The smoke script runs the service on a temporary loopback port with a temporary
+`VCOMTUNNEL_HOME`, so it does not modify an installed local service.
 
 The KMDF smoke tool can exercise a test-installed `VComTunnel.Serial` port
 against a local fake RFC2217 echo server:
@@ -175,6 +179,10 @@ For published builds, pass the explicit service executable if auto-discovery doe
 vcomtunnelctl service install C:\Tools\VComTunnel\VComTunnel.Service.exe
 ```
 
+`service install` also repairs an existing `VComTunnel` service registration by
+updating its `binPath` to the current service executable before the service is
+started again.
+
 When the GUI needs the local API, it first connects to an installed
 `VComTunnel` Windows service; if that is not installed, it starts
 `VComTunnel.Service.exe --console` as a hidden background process. Use
@@ -187,6 +195,11 @@ archives under the release `dependencies` directory:
 
 - `dependencies\hub4com-2.1.0.0-386.zip`
 - `dependencies\com0com-3.0.0.0-i386-and-x64-signed.zip`
+
+The repository keeps pinned copies of these upstream archives under
+`third_party\dependencies` so local and GitHub release packaging can run without
+network access to SourceForge. The packaging script validates the archive
+contents and SHA256 values before copying them into a release package.
 
 Official dependency download links:
 
@@ -228,7 +241,7 @@ notes, and bundled dependency archives into one distributable portable folder
 and `.zip`:
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64
 ```
 
 The default package is self-contained and is intended for direct user download:
@@ -244,15 +257,16 @@ smaller package that requires installed .NET runtimes on the target machine,
 pass `-FrameworkDependent`:
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -FrameworkDependent
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -FrameworkDependent
 ```
 
-By default the script downloads the two upstream dependency archives into the
-package `dependencies` directory. For repeatable/offline release builds, provide
-a pre-populated archive cache:
+By default the script copies the pinned archives from
+`third_party\dependencies` into the package `dependencies` directory. If you
+need to build with a separately reviewed cache, provide a pre-populated archive
+directory with the same file names and SHA256 values:
 
 ```powershell
-scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
+scripts\package-release.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
 ```
 
 The package also includes:
@@ -274,7 +288,7 @@ For installer-style distribution, use the Velopack packaging script:
 
 ```powershell
 dotnet tool restore
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Restore
 ```
 
 Velopack is the preferred installer/update tool because the same packaging
@@ -284,15 +298,20 @@ available. On Windows the script produces a Velopack `Setup.exe` and update
 assets; pass `-Msi` to also generate an MSI:
 
 ```powershell
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Msi
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime win-x64 -Msi
 ```
+
+Public download files are copied to `artifacts\velopack\public\<runtime>` with
+the release version in every file name, for example
+`VComTunnel-1.0.0.rc2-win-x64-Setup.exe`. Velopack's raw update-feed files stay
+under the runtime output directory and keep Velopack's expected names.
 
 For future non-Windows GUI builds, publish the cross-platform app first and pass
 its output directory to the same script:
 
 ```powershell
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
-scripts\package-velopack.ps1 -Version 0.1.0 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
+scripts\package-velopack.ps1 -Version 1.0.0.rc2 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
 ```
 
 Windows and Linux packages can be produced from any supported build OS; macOS
@@ -304,12 +323,15 @@ service and driver setup flows, while Velopack fits the current desktop app and
 future cross-platform installer/update story better.
 
 GitHub Actions can build the Windows installer online. Run the `Package`
-workflow from the Actions tab with a SemVer version, or push a `v*` tag. The
+workflow from the Actions tab with a release version such as `1.0.0` or
+`1.0.0.rc2`, or push a `v*` tag. The
 workflow runs on `windows-latest`, builds and tests the solution, runs
-`scripts\package-velopack.ps1`, uploads the Velopack release assets as a
-workflow artifact, and can upload them to the matching GitHub Release when
-requested. The current online packaging job is Windows-only until the Avalonia
-GUI publish output is available for Linux/macOS.
+`scripts\package-velopack.ps1`, uploads the versioned public release assets as
+a workflow artifact, and can upload them to the matching GitHub Release when
+requested. Release versions containing `rc`, `alpha`, `beta`, `pre`, or
+`preview` are marked as GitHub pre-releases automatically. The current online
+packaging job is Windows-only until the Avalonia GUI publish output is
+available for Linux/macOS.
 
 Each `com0comHub4com` mapping expects:
 
@@ -382,6 +404,12 @@ against the fixed virtual queues, and FIFO/default-configuration UART requests
 are accepted as no-op compatibility calls.
 Remaining hardening work is broader serial compatibility coverage and live ESP-DAP
 compatibility validation against real tools.
+
+The GUI does not install the KMDF driver during the normal dependency setup
+path. It only prompts for the experimental/test-signed driver when a user
+selects a `kmdf` mapping and explicitly creates or updates that KMDF port.
+Windows may require Test Mode and a reboot, and Secure Boot or driver signing
+policy can block installation.
 
 ## Safety and Security
 

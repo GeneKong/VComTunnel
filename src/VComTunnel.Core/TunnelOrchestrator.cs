@@ -385,11 +385,13 @@ public sealed class TunnelOrchestrator
     private string BuildExitMessage(TunnelMapping mapping, Process process)
     {
         var detail = _lastProcessErrors.TryGetValue(mapping.Id, out var lastError) ? $" Last error: {lastError}" : "";
-        if (detail.Contains("CreateFile", StringComparison.OrdinalIgnoreCase)
-            && detail.Contains("ERROR 2", StringComparison.OrdinalIgnoreCase)
-            && !string.IsNullOrWhiteSpace(mapping.BackingPort))
+        if (IsMissingBackingPortError(detail) && !string.IsNullOrWhiteSpace(mapping.BackingPort))
         {
             detail += $" Create the com0com pair first: setupc.exe install PortName={mapping.VisiblePort} PortName={mapping.BackingPort}";
+        }
+        else if (IsBackingPortAccessDeniedError(detail) && !string.IsNullOrWhiteSpace(mapping.BackingPort))
+        {
+            detail += $" Backing port {mapping.BackingPort} is already open or access was denied. Stop the VComTunnel mapping, hub4com/com2tcp, or serial tool using {mapping.BackingPort}, then retry.";
         }
 
         return $"hub4com exited with code {process.ExitCode}.{detail}";
@@ -404,8 +406,20 @@ public sealed class TunnelOrchestrator
 
     private static bool IsPermanentProcessError(string value)
     {
+        return IsMissingBackingPortError(value) || IsBackingPortAccessDeniedError(value);
+    }
+
+    private static bool IsMissingBackingPortError(string value)
+    {
         return value.Contains("CreateFile", StringComparison.OrdinalIgnoreCase)
             && value.Contains("ERROR 2", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsBackingPortAccessDeniedError(string value)
+    {
+        return value.Contains("CreateFile", StringComparison.OrdinalIgnoreCase)
+            && (value.Contains("ERROR 5", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("Access is denied", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool IsPermanentSessionError(string value)

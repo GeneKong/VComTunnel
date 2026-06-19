@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "SemVer package version, for example 0.1.0"
+        description: "Release version, for example 1.0.0 or 1.0.0.rc2"
         required: true
-        default: "0.1.0"
+        default: "1.0.0.rc2"
       runtime:
         description: "Runtime identifier"
         required: true
@@ -20,7 +20,7 @@ on:
         default: true
         type: boolean
       bundle_dependencies:
-        description: "Bundle com0com/hub4com dependency archives"
+        description: "Bundle pinned com0com/hub4com dependency archives"
         required: true
         default: true
         type: boolean
@@ -59,17 +59,35 @@ jobs:
         id: meta
         shell: pwsh
         run: |
+          function ConvertTo-VelopackVersion {
+            param([string]$ReleaseVersion)
+
+            if ($ReleaseVersion -match '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\-.]+)?$') {
+              return $ReleaseVersion
+            }
+
+            if ($ReleaseVersion -match '^(\d+\.\d+\.\d+)\.((?=[0-9A-Za-z\-.]*[A-Za-z])[0-9A-Za-z][0-9A-Za-z\-.]*)(\+[0-9A-Za-z\-.]+)?$') {
+              return "$($Matches[1])-$($Matches[2])$($Matches[3])"
+            }
+
+            throw "Version '$ReleaseVersion' is not supported. Use SemVer2 such as 1.0.0-rc2, or release labels such as 1.0.0.rc2."
+          }
+
           if ("${{ github.ref_type }}" -eq "tag") {
             $version = "${{ github.ref_name }}" -replace '^v', ''
           } else {
             $version = "${{ github.event.inputs.version }}"
           }
 
-          if ($version -notmatch '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\-.]+)?$') {
-            throw "Version '$version' is not SemVer2. Use values like 0.1.0 or 0.1.0-beta."
+          if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z.\-+]*$') {
+            throw "Release version may only contain letters, numbers, dot, dash, and plus. Provided: $version"
           }
 
+          $packageVersion = ConvertTo-VelopackVersion $version
+          $preRelease = $packageVersion -match '(?i)(^|[.\-])(alpha|beta|rc|preview|pre)([.\-]|[0-9]|$)'
           "version=$version" >> $env:GITHUB_OUTPUT
+          "package_version=$packageVersion" >> $env:GITHUB_OUTPUT
+          "prerelease=$($preRelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "tag=v$version" >> $env:GITHUB_OUTPUT
 
       - name: Restore dependencies and tools
@@ -86,30 +104,29 @@ jobs:
       - name: Package Velopack assets
         shell: pwsh
         run: |
-          $args = @(
-            "-Version", "${{ steps.meta.outputs.version }}",
-            "-Runtime", "$env:PACKAGE_RUNTIME",
-            "-Restore",
-            "-OutputRoot", "artifacts\github-release"
-          )
+          $packageArgs = @{
+            Version = "${{ steps.meta.outputs.version }}"
+            Runtime = "$env:PACKAGE_RUNTIME"
+            Restore = $true
+            OutputRoot = "artifacts\github-release"
+          }
 
           if ($env:PACKAGE_MSI -eq "true") {
-            $args += "-Msi"
+            $packageArgs.Msi = $true
           }
 
           if ($env:PACKAGE_BUNDLE_DEPENDENCIES -ne "true") {
-            $args += "-SkipBundledDependencies"
+            $packageArgs.SkipBundledDependencies = $true
           }
 
-          scripts\package-velopack.ps1 @args
+          & scripts\package-velopack.ps1 @packageArgs
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: vcomtunnel-${{ steps.meta.outputs.version }}-${{ env.PACKAGE_RUNTIME }}
           path: |
-            artifacts/github-release/${{ env.PACKAGE_RUNTIME }}/*
-            artifacts/github-release/staging/*.zip
+            artifacts/github-release/public/${{ env.PACKAGE_RUNTIME }}/*
           if-no-files-found: error
 
       - name: Upload GitHub Release assets
@@ -119,13 +136,60 @@ jobs:
         shell: pwsh
         run: |
           $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ steps.meta.outputs.tag }}" }
+          $preRelease = [System.Convert]::ToBoolean("${{ steps.meta.outputs.prerelease }}")
+          $assetPaths = @(
+            Get-ChildItem -LiteralPath "artifacts\github-release\public\${{ env.PACKAGE_RUNTIME }}" -File
+          )
+
+          if ($assetPaths.Count -eq 0) {
+            throw "No release assets were produced."
+          }
+
+          $unversionedAssets = @($assetPaths | Where-Object { $_.Name -notlike "*${{ steps.meta.outputs.version }}*" })
+          if ($unversionedAssets.Count -gt 0) {
+            throw "Release asset names must include version '${{ steps.meta.outputs.version }}': $($unversionedAssets.Name -join ', ')"
+          }
+
+          $assetArguments = @($assetPaths | ForEach-Object { $_.FullName })
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "VComTunnel ${{ steps.meta.outputs.version }}" --notes "Automated VComTunnel packaging artifacts."
+            $createArgs = @(
+              "release",
+              "create",
+              $tag
+            ) + $assetArguments + @(
+              "--verify-tag",
+              "--title",
+              "VComTunnel ${{ steps.meta.outputs.version }}",
+              "--notes",
+              "Automated VComTunnel packaging artifacts."
+            )
+            if ($preRelease) {
+              $createArgs += "--prerelease"
+            }
+
+            & gh @createArgs
+          } else {
+            gh release upload $tag @assetArguments --clobber
           }
 
-          gh release upload $tag `
-            artifacts\github-release\${{ env.PACKAGE_RUNTIME }}\* `
-            artifacts\github-release\staging\*.zip `
-            --clobber
+          $releaseId = gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq ".id"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseId)) {
+            throw "Could not resolve GitHub Release id for $tag."
+          }
+
+          $preReleaseField = if ($preRelease) { "true" } else { "false" }
+          gh api --method PATCH "repos/${{ github.repository }}/releases/$releaseId" -F "prerelease=$preReleaseField" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not update GitHub Release prerelease flag for $tag."
+          }
+
+          $uploadedCount = gh release view $tag --json assets --jq ".assets | length"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not verify GitHub Release assets for $tag."
+          }
+
+          if ([int]$uploadedCount -lt $assetPaths.Count) {
+            throw "GitHub Release $tag has $uploadedCount asset(s), expected at least $($assetPaths.Count)."
+          }

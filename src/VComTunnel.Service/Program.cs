@@ -25,7 +25,7 @@ internal static class VComTunnelHost
     {
         var builder = WebApplication.CreateBuilder(args);
 
-        builder.WebHost.UseUrls(ResolveListenUrls());
+        builder.WebHost.UseUrls(ServiceEndpoint.GetBaseUrl());
         builder.Services.AddSingleton<ConfigStore>();
         builder.Services.AddSingleton<DependencyDetector>();
         builder.Services.AddSingleton<DependencyInstaller>();
@@ -259,9 +259,6 @@ internal static class VComTunnelHost
         await app.RunAsync(cancellationToken);
     }
 
-    private static string ResolveListenUrls() =>
-        Environment.GetEnvironmentVariable("VCOMTUNNEL_LISTEN_URLS")
-        ?? "http://127.0.0.1:44817";
 }
 
 internal sealed class VComTunnelWindowsService : ServiceBase

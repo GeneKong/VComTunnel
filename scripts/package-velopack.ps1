@@ -23,9 +23,43 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repoRoot "artifacts\velopack"
 }
 
-if ($Version -notmatch '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\-.]+)?$') {
-    throw "Velopack requires a SemVer2 package version such as 0.1.0 or 0.1.0-beta. Provided: $Version"
+if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z.\-+]*$') {
+    throw "Release version may only contain letters, numbers, dot, dash, and plus. Provided: $Version"
 }
+
+function ConvertTo-VelopackVersion {
+    param([string]$ReleaseVersion)
+
+    if ($ReleaseVersion -match '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\-.]+)?$') {
+        return $ReleaseVersion
+    }
+
+    if ($ReleaseVersion -match '^(\d+\.\d+\.\d+)\.((?=[0-9A-Za-z\-.]*[A-Za-z])[0-9A-Za-z][0-9A-Za-z\-.]*)(\+[0-9A-Za-z\-.]+)?$') {
+        return "$($Matches[1])-$($Matches[2])$($Matches[3])"
+    }
+
+    throw "Version '$ReleaseVersion' is not supported. Use SemVer2 such as 1.0.0-rc1, or release labels such as 1.0.0.rc1."
+}
+
+function Copy-PublicAsset {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationName
+    )
+
+    if (Test-Path -LiteralPath $Source) {
+        Copy-Item -LiteralPath $Source -Destination (Join-Path $DestinationDirectory $DestinationName) -Force
+        return $true
+    }
+
+    return $false
+}
+
+$packVersion = ConvertTo-VelopackVersion -ReleaseVersion $Version
 
 function Get-TargetOs {
     param([string]$Runtime)
@@ -70,6 +104,7 @@ function Invoke-Vpk {
 $targetOs = Get-TargetOs -Runtime $Runtime
 $resolvedPackDir = $PackDir
 $resolvedMainExe = $MainExe
+$stagedPortableZip = $null
 
 if ([string]::IsNullOrWhiteSpace($resolvedPackDir)) {
     if ($targetOs -ne "win") {
@@ -107,6 +142,7 @@ if ([string]::IsNullOrWhiteSpace($resolvedPackDir)) {
 
     $packageFlavor = if ($FrameworkDependent) { "framework-dependent" } else { "portable" }
     $resolvedPackDir = Join-Path $stagingRoot "VComTunnel-$Version-$Runtime-$packageFlavor"
+    $stagedPortableZip = Join-Path $stagingRoot "VComTunnel-$Version-$Runtime-$packageFlavor.zip"
     $resolvedMainExe = "VComTunnel.Gui.exe"
 }
 
@@ -127,7 +163,7 @@ $vpkArgs = @(
     "pack",
     "--packId", $PackId,
     "--packTitle", $PackTitle,
-    "--packVersion", $Version,
+    "--packVersion", $packVersion,
     "--packDir", (Resolve-Path -LiteralPath $resolvedPackDir).Path,
     "--mainExe", $resolvedMainExe,
     "--runtime", $Runtime,
@@ -152,4 +188,51 @@ if ($exitCode -ne 0) {
     throw "vpk pack failed with exit code $exitCode."
 }
 
+$publicOutput = Join-Path (Join-Path $OutputRoot "public") $Runtime
+if (Test-Path -LiteralPath $publicOutput) {
+    Remove-Item -LiteralPath $publicOutput -Recurse -Force
+}
+
+New-Item -ItemType Directory -Force -Path $publicOutput | Out-Null
+
+$copiedCount = 0
+if ($stagedPortableZip) {
+    if (Copy-PublicAsset -Source $stagedPortableZip -DestinationDirectory $publicOutput -DestinationName "$PackId-$Version-$Runtime-portable.zip") {
+        $copiedCount++
+    }
+}
+
+if (Copy-PublicAsset -Source (Join-Path $velopackOutput "$PackId-$targetOs-Setup.exe") -DestinationDirectory $publicOutput -DestinationName "$PackId-$Version-$Runtime-Setup.exe") {
+    $copiedCount++
+}
+
+if (Copy-PublicAsset -Source (Join-Path $velopackOutput "$PackId-$targetOs-Portable.zip") -DestinationDirectory $publicOutput -DestinationName "$PackId-$Version-$Runtime-Velopack-Portable.zip") {
+    $copiedCount++
+}
+
+if (Copy-PublicAsset -Source (Join-Path $velopackOutput "$PackId-$targetOs.msi") -DestinationDirectory $publicOutput -DestinationName "$PackId-$Version-$Runtime-Setup.msi") {
+    $copiedCount++
+}
+
+if ($copiedCount -eq 0) {
+    throw "No public release assets were copied from $velopackOutput."
+}
+
+$hashLines = Get-ChildItem -LiteralPath $publicOutput -File |
+    Sort-Object Name |
+    ForEach-Object {
+        $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName
+        "$($hash.Hash)  $($_.Name)"
+    }
+Set-Content -LiteralPath (Join-Path $publicOutput "$PackId-$Version-$Runtime-SHA256SUMS.txt") -Value $hashLines -Encoding ASCII
+
+$unversionedAssets = @(
+    Get-ChildItem -LiteralPath $publicOutput -File |
+        Where-Object { $_.Name -notlike "*$Version*" }
+)
+if ($unversionedAssets.Count -gt 0) {
+    throw "Public release asset names must include version '$Version': $($unversionedAssets.Name -join ', ')"
+}
+
 Write-Host "Velopack releases: $velopackOutput"
+Write-Host "Public release assets: $publicOutput"
