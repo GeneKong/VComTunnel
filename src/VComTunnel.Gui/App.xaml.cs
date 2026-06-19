@@ -1,13 +1,17 @@
-﻿using System.Configuration;
-using System.Data;
 using System.Windows;
+using Velopack;
 
 namespace VComTunnel.Gui;
 
-/// <summary>
-/// Interaction logic for App.xaml
-/// </summary>
 public partial class App : Application
 {
-}
+    [STAThread]
+    public static void Main(string[] args)
+    {
+        VelopackApp.Build().Run();
 
+        var app = new App();
+        app.InitializeComponent();
+        app.Run(new MainWindow());
+    }
+}

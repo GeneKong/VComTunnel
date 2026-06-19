@@ -1,0 +1,131 @@
+name: Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer package version, for example 0.1.0"
+        required: true
+        default: "0.1.0"
+      runtime:
+        description: "Runtime identifier"
+        required: true
+        default: "win-x64"
+        type: choice
+        options:
+          - win-x64
+      msi:
+        description: "Generate MSI in addition to Setup.exe"
+        required: true
+        default: true
+        type: boolean
+      bundle_dependencies:
+        description: "Bundle com0com/hub4com dependency archives"
+        required: true
+        default: true
+        type: boolean
+      upload_release:
+        description: "Upload artifacts to the matching GitHub Release"
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows Velopack
+    runs-on: windows-latest
+
+    env:
+      PACKAGE_RUNTIME: ${{ github.event.inputs.runtime || 'win-x64' }}
+      PACKAGE_MSI: ${{ github.event.inputs.msi || 'true' }}
+      PACKAGE_BUNDLE_DEPENDENCIES: ${{ github.event.inputs.bundle_dependencies || 'true' }}
+      PACKAGE_UPLOAD_RELEASE: ${{ github.event.inputs.upload_release || 'false' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Resolve package version
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          } else {
+            $version = "${{ github.event.inputs.version }}"
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\-.]+)?$') {
+            throw "Version '$version' is not SemVer2. Use values like 0.1.0 or 0.1.0-beta."
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Restore dependencies and tools
+        run: |
+          dotnet restore VComTunnel.sln
+          dotnet tool restore
+
+      - name: Build
+        run: dotnet build VComTunnel.sln -c Release --no-restore
+
+      - name: Test
+        run: dotnet run -c Release --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
+
+      - name: Package Velopack assets
+        shell: pwsh
+        run: |
+          $args = @(
+            "-Version", "${{ steps.meta.outputs.version }}",
+            "-Runtime", "$env:PACKAGE_RUNTIME",
+            "-Restore",
+            "-OutputRoot", "artifacts\github-release"
+          )
+
+          if ($env:PACKAGE_MSI -eq "true") {
+            $args += "-Msi"
+          }
+
+          if ($env:PACKAGE_BUNDLE_DEPENDENCIES -ne "true") {
+            $args += "-SkipBundledDependencies"
+          }
+
+          scripts\package-velopack.ps1 @args
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcomtunnel-${{ steps.meta.outputs.version }}-${{ env.PACKAGE_RUNTIME }}
+          path: |
+            artifacts/github-release/${{ env.PACKAGE_RUNTIME }}/*
+            artifacts/github-release/staging/*.zip
+          if-no-files-found: error
+
+      - name: Upload GitHub Release assets
+        if: github.ref_type == 'tag' || env.PACKAGE_UPLOAD_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ steps.meta.outputs.tag }}" }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "VComTunnel ${{ steps.meta.outputs.version }}" --notes "Automated VComTunnel packaging artifacts."
+          }
+
+          gh release upload $tag `
+            artifacts\github-release\${{ env.PACKAGE_RUNTIME }}\* `
+            artifacts\github-release\staging\*.zip `
+            --clobber

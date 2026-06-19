@@ -156,16 +156,25 @@ vcomtunnelctl service uninstall
 
 ## 发布安装文件
 
-当前仓库已经提供发布脚本，输出的是一个可分发目录和 `.zip` 包：
+当前仓库已经提供发布脚本，输出的是一个用户可以直接解压运行的 portable
+目录和 `.zip` 包：
 
 ```powershell
 scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64
 ```
 
-发布机如果可以访问 NuGet，可以加 `-Restore`：
+默认包是 self-contained，目标机器不需要单独安装 .NET 运行时。用户解压到
+可写目录后运行 `Start-VComTunnel-Portable.cmd`，配置、日志、下载文件和工具
+缓存会放在发布目录下的 `data` 目录。GUI 会在没有安装 Windows Service 时
+自动从同目录拉起 `VComTunnel.Service.exe --console` 后台进程。
+
+发布脚本默认 `--no-restore`。如果发布机可以访问 NuGet，可以加 `-Restore`；
+如果要生成体积更小、但要求目标机器预装 .NET 运行时的包，可以加
+`-FrameworkDependent`：
 
 ```powershell
 scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
+scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -FrameworkDependent
 ```
 
 如果要做可复现的离线发布，提前准备第三方依赖归档，并传入缓存目录：
@@ -177,18 +186,53 @@ scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -DependencyArchiveRo
 发布包会包含：
 
 - GUI、Service、CLI 的发布产物。
+- `README-FIRST.txt` 和 `README-FIRST.zh-CN.txt`。
+- `Start-VComTunnel.cmd`。
+- `Start-VComTunnel-Portable.cmd`。
+- `Setup-Dependencies-Portable.cmd`。
+- `Install-Windows-Service.cmd` 和 `Uninstall-Windows-Service.cmd`。
+- `LICENSE`、`README.md`、`README.zh-CN.md`、`SECURITY.md`。
 - `dependencies` 目录下的 com0com/hub4com 归档。
 - `THIRD-PARTY-NOTICES.txt`。
 - `SHA256SUMS.txt`。
 
-这个脚本目前产出的是 zip 形态的安装包素材，不是完整 MSI/MSIX 安装器。
-后续如果要给普通用户分发，建议再补一个安装器层：
+这个脚本当前产出的是 portable zip，适合 GitHub Release 直接挂载给用户下载。
+如果要发布“普通用户双击安装”的安装器，优先使用 Velopack 脚本：
 
-- WiX/MSI 或 Inno Setup：适合安装 GUI、CLI、Service、开始菜单快捷方式。
-- Windows Service：安装器里调用 `vcomtunnelctl service install`。
-- com0com：保留独立驱动安装确认，不静默绕过。
-- KMDF：生产发布前必须解决正式驱动签名，测试签名驱动不能作为普通用户安装包
-  分发。
+```powershell
+dotnet tool restore
+scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
+```
+
+选择 Velopack 是为了后续跨平台分发保持同一套安装/更新模型：当前 WPF GUI
+只能打 Windows 包；等 Avalonia 跨平台 GUI 成为主入口后，同一套 Velopack
+流程可以继续覆盖 Windows、macOS 和 Linux。当前 Windows 包会生成 Velopack
+`Setup.exe` 和更新资产；如果需要 MSI，可以加 `-Msi`：
+
+```powershell
+scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Msi
+```
+
+后续非 Windows GUI 构建完成后，先发布跨平台应用目录，再把目录交给同一个脚本：
+
+```powershell
+scripts\package-velopack.ps1 -Version 0.1.0 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
+scripts\package-velopack.ps1 -Version 0.1.0 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
+```
+
+Windows 和 Linux 包可以从任意受支持的构建系统生成；macOS 包必须在 macOS
+上生成，因为需要 Apple 的打包和签名工具。正式公开安装器发布前应完成代码签名。
+
+MSIX 暂不作为主线，因为 VComTunnel 仍涉及 Windows Service、com0com 驱动安装
+和后续 KMDF 签名边界。com0com 继续保留独立驱动安装确认，不静默绕过；KMDF
+生产发布前必须解决正式驱动签名，测试签名驱动不能作为普通用户安装包分发。
+
+GitHub Actions 已经可以在线打 Windows 安装包。进入 Actions 里的 `Package`
+workflow，填写 SemVer 版本后手动运行，或者推送 `v*` tag。workflow 会在
+`windows-latest` 上构建、运行测试、执行 `scripts\package-velopack.ps1`，
+并把 Velopack 产物上传为 workflow artifact；需要时也可以上传到对应
+GitHub Release。当前线上打包仍是 Windows-only，等 Avalonia GUI 有
+Linux/macOS publish 产物后再扩展矩阵。
 
 ## KMDF 驱动
 

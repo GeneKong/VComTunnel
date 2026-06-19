@@ -209,15 +209,29 @@ The GUI has a single `Setup deps` button. It checks local dependency state, extr
 
 ## Release packaging
 
-Use the packaging script to publish GUI, service, CLI, and bundled dependency
-archives into one distributable folder and `.zip`:
+Use the packaging script to publish GUI, service, CLI, launch scripts, release
+notes, and bundled dependency archives into one distributable portable folder
+and `.zip`:
 
 ```powershell
 scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64
 ```
 
-The script defaults to `--no-restore`; run a normal restore/build first, or pass
-`-Restore` when the release machine is allowed to access NuGet.
+The default package is self-contained and is intended for direct user download:
+extract it to a writable folder and run `Start-VComTunnel-Portable.cmd`. The
+portable launcher keeps VComTunnel config, logs, downloads, and tool cache under
+the release folder's `data` directory. The GUI will start the local
+`VComTunnel.Service.exe --console` helper when a Windows service is not
+installed.
+
+The script defaults to `--no-restore`; run a normal runtime restore/build first,
+or pass `-Restore` when the release machine is allowed to access NuGet. For a
+smaller package that requires installed .NET runtimes on the target machine,
+pass `-FrameworkDependent`:
+
+```powershell
+scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -FrameworkDependent
+```
 
 By default the script downloads the two upstream dependency archives into the
 package `dependencies` directory. For repeatable/offline release builds, provide
@@ -227,10 +241,61 @@ a pre-populated archive cache:
 scripts\package-release.ps1 -Version 0.1.0 -Runtime win-x64 -DependencyArchiveRoot C:\Deps\VComTunnel
 ```
 
-The package also writes `THIRD-PARTY-NOTICES.txt` and `SHA256SUMS.txt`. The
-included com0com driver package still requires an interactive elevated install
-step on the target machine; bundling it removes the runtime network dependency,
-but does not bypass Windows driver installation policy.
+The package also includes:
+
+- `README-FIRST.txt` and `README-FIRST.zh-CN.txt`
+- `Start-VComTunnel.cmd`
+- `Start-VComTunnel-Portable.cmd`
+- `Setup-Dependencies-Portable.cmd`
+- `Install-Windows-Service.cmd` and `Uninstall-Windows-Service.cmd`
+- `LICENSE`, `README.md`, `README.zh-CN.md`, and `SECURITY.md`
+- `THIRD-PARTY-NOTICES.txt`
+- `SHA256SUMS.txt`
+
+The included com0com driver package still requires an interactive elevated
+install step on the target machine; bundling it removes the runtime network
+dependency, but does not bypass Windows driver installation policy.
+
+For installer-style distribution, use the Velopack packaging script:
+
+```powershell
+dotnet tool restore
+scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
+```
+
+Velopack is the preferred installer/update tool because the same packaging
+model can cover Windows, macOS, and Linux after the cross-platform Avalonia GUI
+becomes the primary UI. With the current WPF GUI, only Windows packaging is
+available. On Windows the script produces a Velopack `Setup.exe` and update
+assets; pass `-Msi` to also generate an MSI:
+
+```powershell
+scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Msi
+```
+
+For future non-Windows GUI builds, publish the cross-platform app first and pass
+its output directory to the same script:
+
+```powershell
+scripts\package-velopack.ps1 -Version 0.1.0 -Runtime linux-x64 -PackDir .\publish\linux-x64 -MainExe VComTunnel
+scripts\package-velopack.ps1 -Version 0.1.0 -Runtime osx-arm64 -PackDir .\publish\osx-arm64 -MainExe VComTunnel
+```
+
+Windows and Linux packages can be produced from any supported build OS; macOS
+packages must be produced on macOS because Apple packaging/signing tools are
+required. Public installer releases should be code-signed.
+
+MSIX is not the primary path right now because VComTunnel needs explicit
+service and driver setup flows, while Velopack fits the current desktop app and
+future cross-platform installer/update story better.
+
+GitHub Actions can build the Windows installer online. Run the `Package`
+workflow from the Actions tab with a SemVer version, or push a `v*` tag. The
+workflow runs on `windows-latest`, builds and tests the solution, runs
+`scripts\package-velopack.ps1`, uploads the Velopack release assets as a
+workflow artifact, and can upload them to the matching GitHub Release when
+requested. The current online packaging job is Windows-only until the Avalonia
+GUI publish output is available for Linux/macOS.
 
 Each `com0comHub4com` mapping expects:
 

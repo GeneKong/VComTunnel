@@ -1,8 +1,7 @@
 ﻿<Application x:Class="VComTunnel.Gui.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:VComTunnel.Gui"
-             StartupUri="MainWindow.xaml">
+             xmlns:local="clr-namespace:VComTunnel.Gui">
     <Application.Resources>
          
     </Application.Resources>
