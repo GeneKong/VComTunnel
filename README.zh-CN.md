@@ -218,6 +218,11 @@ scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Restore
 scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Msi
 ```
 
+公开下载文件会复制到 `artifacts\velopack\public\<runtime>`，并且每个文件名
+都会带发布版本号，例如 `VComTunnel-1.0.0.rc1-win-x64-Setup.exe`。
+Velopack 原始 update-feed 文件仍保留在 runtime 输出目录，继续使用 Velopack
+要求的固定文件名。
+
 后续非 Windows GUI 构建完成后，先发布跨平台应用目录，再把目录交给同一个脚本：
 
 ```powershell
@@ -233,11 +238,11 @@ MSIX 暂不作为主线，因为 VComTunnel 仍涉及 Windows Service、com0com 
 生产发布前必须解决正式驱动签名，测试签名驱动不能作为普通用户安装包分发。
 
 GitHub Actions 已经可以在线打 Windows 安装包。进入 Actions 里的 `Package`
-workflow，填写 SemVer 版本后手动运行，或者推送 `v*` tag。workflow 会在
-`windows-latest` 上构建、运行测试、执行 `scripts\package-velopack.ps1`，
-并把 Velopack 产物上传为 workflow artifact；需要时也可以上传到对应
-GitHub Release。当前线上打包仍是 Windows-only，等 Avalonia GUI 有
-Linux/macOS publish 产物后再扩展矩阵。
+workflow，填写 `1.0.0` 或 `1.0.0.rc1` 这样的发布版本后手动运行，或者推送
+`v*` tag。workflow 会在 `windows-latest` 上构建、运行测试、执行
+`scripts\package-velopack.ps1`，并把带版本号的公开发布文件上传为 workflow
+artifact；需要时也可以上传到对应 GitHub Release。当前线上打包仍是
+Windows-only，等 Avalonia GUI 有 Linux/macOS publish 产物后再扩展矩阵。
 
 ## KMDF 驱动
 

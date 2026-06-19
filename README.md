@@ -277,6 +277,11 @@ assets; pass `-Msi` to also generate an MSI:
 scripts\package-velopack.ps1 -Version 0.1.0 -Runtime win-x64 -Msi
 ```
 
+Public download files are copied to `artifacts\velopack\public\<runtime>` with
+the release version in every file name, for example
+`VComTunnel-1.0.0.rc1-win-x64-Setup.exe`. Velopack's raw update-feed files stay
+under the runtime output directory and keep Velopack's expected names.
+
 For future non-Windows GUI builds, publish the cross-platform app first and pass
 its output directory to the same script:
 
@@ -294,10 +299,11 @@ service and driver setup flows, while Velopack fits the current desktop app and
 future cross-platform installer/update story better.
 
 GitHub Actions can build the Windows installer online. Run the `Package`
-workflow from the Actions tab with a SemVer version, or push a `v*` tag. The
+workflow from the Actions tab with a release version such as `1.0.0` or
+`1.0.0.rc1`, or push a `v*` tag. The
 workflow runs on `windows-latest`, builds and tests the solution, runs
-`scripts\package-velopack.ps1`, uploads the Velopack release assets as a
-workflow artifact, and can upload them to the matching GitHub Release when
+`scripts\package-velopack.ps1`, uploads the versioned public release assets as
+a workflow artifact, and can upload them to the matching GitHub Release when
 requested. The current online packaging job is Windows-only until the Avalonia
 GUI publish output is available for Linux/macOS.
 

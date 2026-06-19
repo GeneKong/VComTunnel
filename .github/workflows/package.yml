@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "SemVer package version, for example 0.1.0"
+        description: "Release version, for example 1.0.0 or 1.0.0.rc1"
         required: true
         default: "0.1.0"
       runtime:
@@ -59,17 +59,33 @@ jobs:
         id: meta
         shell: pwsh
         run: |
+          function ConvertTo-VelopackVersion {
+            param([string]$ReleaseVersion)
+
+            if ($ReleaseVersion -match '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\-.]+)?$') {
+              return $ReleaseVersion
+            }
+
+            if ($ReleaseVersion -match '^(\d+\.\d+\.\d+)\.((?=[0-9A-Za-z\-.]*[A-Za-z])[0-9A-Za-z][0-9A-Za-z\-.]*)(\+[0-9A-Za-z\-.]+)?$') {
+              return "$($Matches[1])-$($Matches[2])$($Matches[3])"
+            }
+
+            throw "Version '$ReleaseVersion' is not supported. Use SemVer2 such as 1.0.0-rc1, or release labels such as 1.0.0.rc1."
+          }
+
           if ("${{ github.ref_type }}" -eq "tag") {
             $version = "${{ github.ref_name }}" -replace '^v', ''
           } else {
             $version = "${{ github.event.inputs.version }}"
           }
 
-          if ($version -notmatch '^\d+\.\d+\.\d+([\-+][0-9A-Za-z\-.]+)?$') {
-            throw "Version '$version' is not SemVer2. Use values like 0.1.0 or 0.1.0-beta."
+          if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z.\-+]*$') {
+            throw "Release version may only contain letters, numbers, dot, dash, and plus. Provided: $version"
           }
 
+          $packageVersion = ConvertTo-VelopackVersion $version
           "version=$version" >> $env:GITHUB_OUTPUT
+          "package_version=$packageVersion" >> $env:GITHUB_OUTPUT
           "tag=v$version" >> $env:GITHUB_OUTPUT
 
       - name: Restore dependencies and tools
@@ -108,8 +124,7 @@ jobs:
         with:
           name: vcomtunnel-${{ steps.meta.outputs.version }}-${{ env.PACKAGE_RUNTIME }}
           path: |
-            artifacts/github-release/${{ env.PACKAGE_RUNTIME }}/*
-            artifacts/github-release/staging/*.zip
+            artifacts/github-release/public/${{ env.PACKAGE_RUNTIME }}/*
           if-no-files-found: error
 
       - name: Upload GitHub Release assets
@@ -120,13 +135,18 @@ jobs:
         run: |
           $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ steps.meta.outputs.tag }}" }
           $assetPaths = @(
-            Get-ChildItem -LiteralPath "artifacts\github-release\${{ env.PACKAGE_RUNTIME }}" -File
-            Get-ChildItem -LiteralPath "artifacts\github-release\staging" -Filter "*.zip" -File
+            Get-ChildItem -LiteralPath "artifacts\github-release\public\${{ env.PACKAGE_RUNTIME }}" -File
           )
 
           if ($assetPaths.Count -eq 0) {
             throw "No release assets were produced."
           }
+
+          $unversionedAssets = @($assetPaths | Where-Object { $_.Name -notlike "*${{ steps.meta.outputs.version }}*" })
+          if ($unversionedAssets.Count -gt 0) {
+            throw "Release asset names must include version '${{ steps.meta.outputs.version }}': $($unversionedAssets.Name -join ', ')"
+          }
+
           $assetArguments = @($assetPaths | ForEach-Object { $_.FullName })
 
           gh release view $tag *> $null
