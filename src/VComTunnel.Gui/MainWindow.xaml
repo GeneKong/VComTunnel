@@ -42,15 +42,6 @@
               Background="#F6F8FA"
               BorderBrush="#D0D7DE"
               BorderThickness="0,0,0,1">
-            <MenuItem x:Name="ServiceMenuItem" Header="Service">
-                <MenuItem x:Name="RefreshMenuItem" Header="Refresh" Click="Refresh_Click"/>
-                <MenuItem x:Name="InstallServiceMenuItem" Header="Install background service" Click="InstallService_Click"/>
-                <MenuItem x:Name="UninstallServiceMenuItem" Header="Uninstall background service" Click="UninstallService_Click"/>
-                <Separator/>
-                <MenuItem x:Name="StartServiceMenuItem" Header="Start service" Click="StartService_Click"/>
-                <MenuItem x:Name="StopServiceMenuItem" Header="Stop service" Click="StopService_Click"/>
-                <MenuItem x:Name="RestartServiceMenuItem" Header="Restart service" Click="RestartService_Click"/>
-            </MenuItem>
             <MenuItem x:Name="MappingsMenuItem" Header="Mappings">
                 <MenuItem x:Name="AddMenuItem" Header="Add" Click="Add_Click"/>
                 <MenuItem x:Name="SaveMenuItem" Header="Save" Click="Save_Click"/>
@@ -80,6 +71,15 @@
                           IsCheckable="True"
                           Click="ChineseLanguageMenuItem_Click"/>
             </MenuItem>
+            <MenuItem x:Name="ServiceMenuItem" Header="Service">
+                <MenuItem x:Name="RefreshMenuItem" Header="Refresh" Click="Refresh_Click"/>
+                <MenuItem x:Name="InstallServiceMenuItem" Header="Install background service" Click="InstallService_Click"/>
+                <MenuItem x:Name="UninstallServiceMenuItem" Header="Uninstall background service" Click="UninstallService_Click"/>
+                <Separator/>
+                <MenuItem x:Name="StartServiceMenuItem" Header="Start service" Click="StartService_Click"/>
+                <MenuItem x:Name="StopServiceMenuItem" Header="Stop service" Click="StopService_Click"/>
+                <MenuItem x:Name="RestartServiceMenuItem" Header="Restart service" Click="RestartService_Click"/>
+            </MenuItem>
         </Menu>
 
         <Border x:Name="IconToolBar"
@@ -92,9 +92,6 @@
                 <Button x:Name="RefreshButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"
                         Click="Refresh_Click"/>
-                <Button x:Name="RestartServiceButton"
-                        Style="{StaticResource ToolBarIconButtonStyle}"
-                        Click="RestartService_Click"/>
                 <Border Style="{StaticResource ToolBarSeparatorStyle}"/>
                 <Button x:Name="AddButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"
@@ -119,6 +116,10 @@
                 <Button x:Name="ClearLogsButton"
                         Style="{StaticResource ToolBarIconButtonStyle}"
                         Click="ClearLogs_Click"/>
+                <Border Style="{StaticResource ToolBarSeparatorStyle}"/>
+                <Button x:Name="RestartServiceButton"
+                        Style="{StaticResource ToolBarIconButtonStyle}"
+                        Click="RestartService_Click"/>
             </StackPanel>
         </Border>
 
@@ -184,7 +185,6 @@
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
                         <DataGridTextColumn x:Name="MappingStateColumn" Header="State" Binding="{Binding StateLabel}" Width="Auto" MinWidth="90" IsReadOnly="True"/>
-                        <DataGridTextColumn x:Name="ServiceColumn" Header="Service" Binding="{Binding ServiceLabel}" Width="Auto" MinWidth="180" IsReadOnly="True"/>
                         <DataGridTextColumn x:Name="NameColumn" Header="Name" Binding="{Binding Name}" Width="Auto" MinWidth="120"/>
                         <DataGridComboBoxColumn x:Name="BackendColumn" Header="Backend" SelectedItemBinding="{Binding Backend, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="Auto" MinWidth="150">
                             <DataGridComboBoxColumn.ItemsSource>
@@ -201,6 +201,7 @@
                         <DataGridTextColumn x:Name="PortColumn" Header="Port" Binding="{Binding Port}" Width="Auto" MinWidth="72"/>
                         <DataGridCheckBoxColumn x:Name="AutoColumn" Header="Auto" Binding="{Binding AutoStart, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="SizeToHeader" MinWidth="64"/>
                         <DataGridCheckBoxColumn x:Name="RestartColumn" Header="Restart" Binding="{Binding RestartOnFailure}" Width="SizeToHeader" MinWidth="72"/>
+                        <DataGridTextColumn x:Name="ServiceColumn" Header="Service" Binding="{Binding ServiceLabel}" Width="Auto" MinWidth="180" IsReadOnly="True"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </GroupBox>

@@ -26,7 +26,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("RFC2217 ack semantics", () => Task.Run(Rfc2217AckSemantics)),
     ("RFC2217 notification mappings", () => Task.Run(Rfc2217NotificationMappings)),
     ("RFC2217 local flow-control depth", () => Task.Run(Rfc2217LocalFlowControlDepth)),
-    ("com2tcp command uses batch wrapper", () => Task.Run(Com2TcpCommandUsesBatchWrapper)),
+    ("hub4com default command avoids control filters", () => Task.Run(Hub4comDefaultCommandAvoidsControlFilters)),
     ("missing dependencies fault mapping", MissingDependenciesFaultMappingAsync),
     ("missing backing port faults before hub4com", MissingBackingPortFaultsBeforeHub4comAsync),
     ("com0com service backend starts without hub4com", Com0comServiceBackendStartsWithoutHub4comAsync),
@@ -37,11 +37,12 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com create and remove plans", Com0comCreateAndRemovePlansAsync),
     ("KMDF mapping reports startup fault", KmdfMappingReportsStartupFaultAsync),
     ("KMDF session restarts after network fault", KmdfSessionRestartsAfterNetworkFaultAsync),
+    ("KMDF default start suppresses initial control lines", KmdfDefaultStartSuppressesInitialControlLinesAsync),
     ("KMDF permanent driver faults do not restart", KmdfPermanentDriverFaultDoesNotRestartAsync),
-    ("fake com2tcp process starts and stops", FakeCom2TcpProcessStartsAndStopsAsync),
-    ("fake com2tcp process restarts after exit", FakeCom2TcpProcessRestartsAfterExitAsync),
-    ("fake com2tcp access denied does not restart", FakeCom2TcpAccessDeniedDoesNotRestartAsync),
-    ("manual stop suppresses fake com2tcp restart", ManualStopSuppressesFakeCom2TcpRestartAsync),
+    ("fake hub4com process starts and stops", FakeHub4comProcessStartsAndStopsAsync),
+    ("fake hub4com process restarts after exit", FakeHub4comProcessRestartsAfterExitAsync),
+    ("fake hub4com access denied does not restart", FakeHub4comAccessDeniedDoesNotRestartAsync),
+    ("manual stop suppresses fake hub4com restart", ManualStopSuppressesFakeHub4comRestartAsync),
     ("dependency installer extracts tool zips", DependencyInstallerExtractsToolZipsAsync),
     ("dependency installer uses bundled release archives", DependencyInstallerUsesBundledReleaseArchivesAsync),
     ("dependency installer falls back after invalid mirror", DependencyInstallerFallsBackAfterInvalidMirrorAsync),
@@ -688,7 +689,7 @@ static void Rfc2217LocalFlowControlDepth()
     AssertEqual("0", state.SuspendDepth.ToString());
 }
 
-static void Com2TcpCommandUsesBatchWrapper()
+static void Hub4comDefaultCommandAvoidsControlFilters()
 {
     using var temp = new TempDir();
     CreateFakeDependencies(temp.Path);
@@ -700,10 +701,16 @@ static void Com2TcpCommandUsesBatchWrapper()
         Port = 3333
     });
 
-    AssertEqual("cmd.exe", command.FileName);
-    AssertStringContains(command.Arguments, "com2tcp-rfc2217.bat");
+    AssertStringContains(command.FileName, "hub4com.exe");
     AssertStringContains(command.Arguments, "\\\\.\\CNCB12");
-    AssertStringContains(command.Arguments, "192.168.1.50 3333");
+    AssertStringContains(command.Arguments, "*192.168.1.50:3333");
+    AssertStringContains(command.Arguments, "--create-filter=telnet,tcp,telnet");
+    AssertTrue(!command.Arguments.Contains("com2tcp-rfc2217.bat", StringComparison.OrdinalIgnoreCase), "Default command must not use the com2tcp batch wrapper.");
+    AssertTrue(!command.Arguments.Contains("pinmap", StringComparison.OrdinalIgnoreCase), "Default command must not install pinmap filters.");
+    AssertTrue(!command.Arguments.Contains("linectl", StringComparison.OrdinalIgnoreCase), "Default command must not install line-control filters.");
+    AssertTrue(!command.Arguments.Contains("--rts", StringComparison.OrdinalIgnoreCase), "Default command must not map RTS.");
+    AssertTrue(!command.Arguments.Contains("--dtr", StringComparison.OrdinalIgnoreCase), "Default command must not map DTR.");
+    AssertTrue(!command.Arguments.Contains("break=break", StringComparison.OrdinalIgnoreCase), "Default command must not map BREAK.");
 }
 
 static async Task MissingDependenciesFaultMappingAsync()
@@ -1027,6 +1034,37 @@ static async Task KmdfSessionRestartsAfterNetworkFaultAsync()
         "KMDF network fault should schedule a restart.");
 }
 
+static async Task KmdfDefaultStartSuppressesInitialControlLinesAsync()
+{
+    using var temp = new TempDir();
+    var mapping = new TunnelMapping
+    {
+        Name = "Default safe driver",
+        Backend = TunnelBackend.Kmdf,
+        VisiblePort = "COM49",
+        BackingPort = null,
+        RestartOnFailure = false
+    };
+    var store = await StoreWithMappingAsync(temp.Path, mapping);
+    bool? suppressInitialControlLineSync = null;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        new InMemoryLog(),
+        [],
+        kmdfSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            suppressInitialControlLineSync = sessionMapping.SuppressInitialControlLineSync;
+            return new FakeKmdfTunnelSession(faulted, failAfterStart: null);
+        });
+
+    await orchestrator.StartAsync(mapping.Id);
+
+    AssertTrue(suppressInitialControlLineSync == true, "KMDF default start should suppress the initial DTR/RTS sync event.");
+    var status = orchestrator.GetStatus().Tunnels.Single(t => t.Id == mapping.Id);
+    AssertEqual(TunnelRunState.Running.ToString(), status.State.ToString());
+}
+
 static async Task KmdfPermanentDriverFaultDoesNotRestartAsync()
 {
     using var temp = new TempDir();
@@ -1127,7 +1165,7 @@ static async Task Com0comCreateAndRemovePlansAsync()
     }
 }
 
-static async Task FakeCom2TcpProcessStartsAndStopsAsync()
+static async Task FakeHub4comProcessStartsAndStopsAsync()
 {
     using var temp = new TempDir();
     CreateFakeDependencies(temp.Path);
@@ -1142,27 +1180,32 @@ static async Task FakeCom2TcpProcessStartsAndStopsAsync()
     };
     var store = await StoreWithMappingAsync(temp.Path, mapping);
     var log = new InMemoryLog();
-    var orchestrator = CreateOrchestrator(store, new DependencyDetector([temp.Path], pathOverride: ""), log);
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        [],
+        hub4comCommandFactory: mapping => BuildFakeHub4comCommand(temp.Path, mapping));
     var id = (await store.LoadAsync()).Mappings.Single().Id;
 
     var started = await orchestrator.StartAsync(id);
     AssertEqual(TunnelRunState.Running.ToString(), started.State.ToString());
     AssertTrue(started.ProcessId is not null, "Process id should be reported.");
     await Task.Delay(500);
-    AssertTrue(log.Snapshot().Any(e => e.Message.Contains("fake-com2tcp", StringComparison.OrdinalIgnoreCase)), "Fake process output should be logged.");
+    AssertTrue(log.Snapshot().Any(e => e.Message.Contains("fake-hub4com", StringComparison.OrdinalIgnoreCase)), "Fake process output should be logged.");
 
     var stopped = orchestrator.Stop(id);
     AssertEqual(TunnelRunState.Stopped.ToString(), stopped.State.ToString());
 }
 
-static async Task FakeCom2TcpProcessRestartsAfterExitAsync()
+static async Task FakeHub4comProcessRestartsAfterExitAsync()
 {
     using var temp = new TempDir();
     CreateFakeDependencies(
         temp.Path,
         """
         @echo off
-        echo fake-com2tcp %*
+        echo fake-hub4com %*
         ping -n 2 127.0.0.1 > nul
         """);
     var mapping = new TunnelMapping
@@ -1181,6 +1224,7 @@ static async Task FakeCom2TcpProcessRestartsAfterExitAsync()
         new DependencyDetector([temp.Path], pathOverride: ""),
         log,
         [],
+        hub4comCommandFactory: mapping => BuildFakeHub4comCommand(temp.Path, mapping),
         restartDelay: TimeSpan.FromMilliseconds(50));
     var id = (await store.LoadAsync()).Mappings.Single().Id;
 
@@ -1196,7 +1240,7 @@ static async Task FakeCom2TcpProcessRestartsAfterExitAsync()
     orchestrator.Stop(id);
 }
 
-static async Task FakeCom2TcpAccessDeniedDoesNotRestartAsync()
+static async Task FakeHub4comAccessDeniedDoesNotRestartAsync()
 {
     using var temp = new TempDir();
     CreateFakeDependencies(
@@ -1222,6 +1266,7 @@ static async Task FakeCom2TcpAccessDeniedDoesNotRestartAsync()
         new DependencyDetector([temp.Path], pathOverride: ""),
         log,
         [],
+        hub4comCommandFactory: mapping => BuildFakeHub4comCommand(temp.Path, mapping),
         restartDelay: TimeSpan.FromMilliseconds(50));
     var id = (await store.LoadAsync()).Mappings.Single().Id;
 
@@ -1240,7 +1285,7 @@ static async Task FakeCom2TcpAccessDeniedDoesNotRestartAsync()
         log.Snapshot().Count(e => e.Message.Contains("Started hub4com process", StringComparison.OrdinalIgnoreCase)).ToString());
 }
 
-static async Task ManualStopSuppressesFakeCom2TcpRestartAsync()
+static async Task ManualStopSuppressesFakeHub4comRestartAsync()
 {
     using var temp = new TempDir();
     CreateFakeDependencies(temp.Path);
@@ -1260,6 +1305,7 @@ static async Task ManualStopSuppressesFakeCom2TcpRestartAsync()
         new DependencyDetector([temp.Path], pathOverride: ""),
         log,
         [],
+        hub4comCommandFactory: mapping => BuildFakeHub4comCommand(temp.Path, mapping),
         restartDelay: TimeSpan.FromMilliseconds(50));
     var id = (await store.LoadAsync()).Mappings.Single().Id;
 
@@ -1418,6 +1464,7 @@ static TunnelOrchestrator CreateOrchestratorWithPorts(
     IReadOnlyList<string>? registeredPorts,
     Func<TunnelMapping, InMemoryLog, Action<IKmdfTunnelSession, string>, IKmdfTunnelSession>? kmdfSessionFactory = null,
     Func<TunnelMapping, InMemoryLog, Action<IManagedTunnelSession, string>, IManagedTunnelSession>? com0comServiceSessionFactory = null,
+    Func<TunnelMapping, Hub4comCommand>? hub4comCommandFactory = null,
     TimeSpan? restartDelay = null)
 {
     return new TunnelOrchestrator(
@@ -1428,18 +1475,27 @@ static TunnelOrchestrator CreateOrchestratorWithPorts(
         log,
         kmdfSessionFactory,
         com0comServiceSessionFactory,
+        hub4comCommandFactory,
         restartDelay);
 }
 
-static void CreateFakeDependencies(string root, string? com2tcpBody = null)
+static Hub4comCommand BuildFakeHub4comCommand(string root, TunnelMapping mapping)
+{
+    var script = Path.Combine(root, "fake-hub4com.cmd");
+    var args = $"/d /c \"\"{script}\" \"\\\\.\\{mapping.BackingPort}\" {mapping.Host} {mapping.Port}\"";
+    return new Hub4comCommand("cmd.exe", args);
+}
+
+static void CreateFakeDependencies(string root, string? fakeHub4comBody = null)
 {
     File.WriteAllText(Path.Combine(root, "setupc.exe"), "");
     File.WriteAllText(Path.Combine(root, "hub4com.exe"), "");
+    File.WriteAllText(Path.Combine(root, "com2tcp-rfc2217.bat"), "@echo off");
     File.WriteAllText(
-        Path.Combine(root, "com2tcp-rfc2217.bat"),
-        com2tcpBody ?? """
+        Path.Combine(root, "fake-hub4com.cmd"),
+        fakeHub4comBody ?? """
         @echo off
-        echo fake-com2tcp %*
+        echo fake-hub4com %*
         ping -n 4 127.0.0.1 > nul
         """);
 }

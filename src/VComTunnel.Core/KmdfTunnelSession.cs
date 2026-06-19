@@ -58,6 +58,7 @@ public sealed class KmdfTunnelSession : IKmdfTunnelSession
     private readonly TunnelMapping _mapping;
     private readonly InMemoryLog _log;
     private readonly Action<IKmdfTunnelSession, string> _faulted;
+    private readonly bool _suppressInitialControlLineSync;
     private readonly Rfc2217Client _rfc2217 = new();
     private readonly Rfc2217LocalFlowControlState _localFlowControl = new();
     private readonly object _ackLock = new();
@@ -75,6 +76,7 @@ public sealed class KmdfTunnelSession : IKmdfTunnelSession
     private Task? _eventLoop;
     private Task? _networkLoop;
     private Task? _keepAliveLoop;
+    private bool _initialControlLineSyncHandled;
     private int _disposed;
 
     public KmdfTunnelSession(TunnelMapping mapping, InMemoryLog log, Action<IKmdfTunnelSession, string> faulted)
@@ -82,6 +84,7 @@ public sealed class KmdfTunnelSession : IKmdfTunnelSession
         _mapping = mapping;
         _log = log;
         _faulted = faulted;
+        _suppressInitialControlLineSync = mapping.SuppressInitialControlLineSync;
         State = TunnelRunState.Starting;
         MarkNetworkActivity();
     }
@@ -753,6 +756,14 @@ public sealed class KmdfTunnelSession : IKmdfTunnelSession
                 var mask = ReadUInt32(buffer, offset);
                 bool? dtr = (mask & ModemControlDtr) != 0 ? buffer[offset + 4] != 0 : null;
                 bool? rts = (mask & ModemControlRts) != 0 ? buffer[offset + 5] != 0 : null;
+                if (_suppressInitialControlLineSync && !_initialControlLineSyncHandled)
+                {
+                    _initialControlLineSyncHandled = true;
+                    _log.Info(_mapping.Name, $"Suppressed initial modem-control sync dtr={dtr?.ToString() ?? "-"}, rts={rts?.ToString() ?? "-"}.");
+                    return new Rfc2217OutboundFrame([], [], "initial modem-control sync suppressed");
+                }
+
+                _initialControlLineSyncHandled = true;
                 _log.Info(_mapping.Name, $"RFC2217 set modem dtr={dtr?.ToString() ?? "-"}, rts={rts?.ToString() ?? "-"}.");
                 return new Rfc2217OutboundFrame(
                     Rfc2217Client.BuildSetModemControl(dtr, rts),

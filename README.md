@@ -16,7 +16,7 @@ expect a normal `COMx` device.
 - Local Windows service/API for long-running tunnel lifecycle management
 - CLI helper `vcomtunnelctl` for diagnostics, setup, status, and automation
 - Multiple mappings stored in `%ProgramData%\VComTunnel\config.json`
-- Baseline bridge path through `com0com` and `hub4com`/`com2tcp-rfc2217`
+- Baseline bridge path through `com0com` and hub4com without default control-line forwarding
 - Transitional `com0comService` backend that removes the hub4com process from
   the data path
 - Experimental native KMDF virtual serial backend for future dependency-free
@@ -48,7 +48,7 @@ Supported backend shapes:
 
 ```text
 com0comHub4com:
-serial tool -> COMx -> com0com -> CNCBx -> hub4com/com2tcp-rfc2217 -> RFC2217
+serial tool -> COMx -> com0com -> CNCBx -> hub4com no-control-lines bridge -> RFC2217
 
 com0comService:
 serial tool -> COMx -> com0com -> CNCBx -> VComTunnel.Service -> RFC2217
@@ -68,9 +68,10 @@ The captured Windows run shows the stable `com0comHub4com` backend in service:
 the local service is connected, one mapping is running, and no mapping fault is
 reported. The active mapping uses `COM12` as the visible port and `CNCB12` as
 the com0com backing port. The diagnostics panel reports `com0com/hub4com ready:
-True`, `KMDF install tool ready: True`, and resolved paths for `setupc.exe`,
-`hub4com.exe`, and `com2tcp-rfc2217.bat`. The log panel shows RFC2217 traffic
-for `Tunnel 1`.
+True`, `KMDF install tool ready: True`, and resolved paths for `setupc.exe` and
+`hub4com.exe`. The optional legacy `com2tcp-rfc2217.bat` wrapper is reported
+when present, but the default bridge path does not use it. The log panel shows
+RFC2217 traffic for `Tunnel 1`.
 
 ## Verified Windows Build
 
@@ -333,13 +334,18 @@ Each `com0comHub4com` mapping expects:
 - `backingPort`: the com0com peer consumed by hub4com, for example `CNCB12`
 - `host` and `port`: the ESP-DAP RFC2217 endpoint
 
-The bridge process is launched through hub4com's wrapper:
+The bridge process is launched through hub4com directly, using a default
+no-control-lines filter chain:
 
 ```text
-com2tcp-rfc2217.bat \\.\CNCB12 192.168.1.50 5000
+hub4com --create-filter=escparse,com,parse --add-filters=0:com --create-filter=telnet,tcp,telnet:" --comport=client" --add-filters=1:tcp --octs=off \\.\CNCB12 --use-driver=tcp *192.168.1.50:5000
 ```
 
-This mirrors the known hub4com RFC2217 client pattern and keeps baud-rate and line-control negotiation inside the wrapper.
+This establishes the data/Telnet bridge but does not install the DTR, RTS,
+BREAK, or line-control forwarding filters. Mapping start, `autoStart`, and
+service recovery therefore do not implicitly reset a target or put it into a
+bootloader. Target reset and bootloader entry should come from an explicit
+future control action instead of the default tunnel start path.
 
 ## Phase 1 real device bring-up
 
@@ -415,6 +421,9 @@ policy can block installation.
   disposable, backed-up, or otherwise recoverable Windows test machine.
 - Some DTR/RTS/BREAK/purge tests can reset or disturb attached boards. Use the
   safer RFC2217 probe modes first when working against real hardware.
+- Mapping start, `autoStart`, and automatic service recovery are data-link
+  paths by default. They avoid DTR/RTS/BREAK forwarding; target reset and
+  bootloader entry must come from an explicit manual or tool-driven action.
 
 See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 

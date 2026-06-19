@@ -35,6 +35,8 @@ public sealed record TunnelMapping
     public TunnelProtocol Protocol { get; init; } = TunnelProtocol.Rfc2217;
     public bool AutoStart { get; init; }
     public bool RestartOnFailure { get; init; } = true;
+    [JsonIgnore]
+    public bool SuppressInitialControlLineSync { get; init; }
 }
 
 public sealed record VComTunnelConfig

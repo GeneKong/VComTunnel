@@ -530,7 +530,7 @@ internal static class VComTunnelCtl
     {
         Console.WriteLine("""
         vcomtunnelctl commands:
-          diagnose                 Check com0com, hub4com, com2tcp-rfc2217, pnputil
+          diagnose                 Check com0com, hub4com, optional legacy com2tcp-rfc2217, pnputil
           init-config              Create a sample multi-mapping config
           create-hints             Print setupc.exe commands for com0com pairs
           status                   Read /api/status from the local service

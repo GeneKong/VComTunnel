@@ -23,13 +23,13 @@ public sealed class DependencyDetector
         {
             ToStatus("com0com setupc.exe", setupc, "Install com0com and make setupc.exe available."),
             ToStatus("hub4com.exe", hub4com, "Install hub4com and make hub4com.exe available."),
-            ToStatus("com2tcp-rfc2217.bat", com2tcp, "Install hub4com and make com2tcp-rfc2217.bat available."),
+            ToStatus("com2tcp-rfc2217.bat", com2tcp, "Optional legacy hub4com wrapper; the default bridge path uses hub4com.exe directly without control-line filters."),
             ToStatus("pnputil.exe", pnputil, "Windows pnputil is required for manual KMDF driver install scripts.")
         };
 
         return new SystemDependencyReport(
             items,
-            setupc is not null && hub4com is not null && com2tcp is not null,
+            setupc is not null && hub4com is not null,
             pnputil is not null);
     }
 
