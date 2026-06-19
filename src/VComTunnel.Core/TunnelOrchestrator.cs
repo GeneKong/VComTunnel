@@ -234,6 +234,12 @@ public sealed class TunnelOrchestrator
 
     private void OnSessionFaulted(TunnelMapping mapping, IManagedTunnelSession session, string error)
     {
+        if (!_tunnels.TryGetValue(mapping.Id, out var existing) || !ReferenceEquals(existing.Session, session))
+        {
+            _log.Info(mapping.Name, $"Ignored stale {FormatBackendForLog(mapping.Backend)} fault after the tunnel was stopped or replaced: {error}");
+            return;
+        }
+
         _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, error);
         ScheduleSessionRestart(mapping, error);
     }

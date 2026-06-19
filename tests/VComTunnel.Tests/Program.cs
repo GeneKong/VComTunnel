@@ -29,6 +29,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com service backend starts without hub4com", Com0comServiceBackendStartsWithoutHub4comAsync),
     ("com0com service backend restarts after network fault", Com0comServiceBackendRestartsAfterNetworkFaultAsync),
     ("starting same endpoint stops prior tunnel", StartingSameEndpointStopsPriorTunnelAsync),
+    ("stale stopped session fault is ignored", StaleStoppedSessionFaultIsIgnoredAsync),
     ("com0com service backing open diagnostics", () => Task.Run(Com0comServiceBackingOpenDiagnostics)),
     ("com0com create and remove plans", Com0comCreateAndRemovePlansAsync),
     ("KMDF mapping reports startup fault", KmdfMappingReportsStartupFaultAsync),
@@ -817,6 +818,61 @@ static async Task StartingSameEndpointStopsPriorTunnelAsync()
     AssertTrue(
         log.Snapshot().Any(e => e.Message.Contains("same RFC2217 endpoint 127.0.0.1:5000", StringComparison.OrdinalIgnoreCase)),
         "Starting a mapping should explain why a prior same-endpoint tunnel was stopped.");
+}
+
+static async Task StaleStoppedSessionFaultIsIgnoredAsync()
+{
+    using var temp = new TempDir();
+    var managed = new TunnelMapping
+    {
+        Id = "managed",
+        Name = "COM27 managed",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM27",
+        BackingPort = "CNCB27",
+        Host = "127.0.0.1",
+        Port = 5000
+    };
+    var kmdf = new TunnelMapping
+    {
+        Id = "kmdf",
+        Name = "COM25 driver",
+        Backend = TunnelBackend.Kmdf,
+        VisiblePort = "COM25",
+        BackingPort = null,
+        Host = "127.0.0.1",
+        Port = 5000
+    };
+    var store = new ConfigStore(Path.Combine(temp.Path, "config.json"));
+    await store.SaveAsync(new VComTunnelConfig { Mappings = [managed, kmdf] });
+    var log = new InMemoryLog();
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM27", "CNCB27"],
+        kmdfSessionFactory: (sessionMapping, sessionLog, faulted) => new FakeKmdfTunnelSession(faulted, failAfterStart: null),
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) => new FakeManagedTunnelSession(
+            faulted,
+            failAfterStart: "late old tunnel fault"));
+
+    var first = await orchestrator.StartAsync("managed");
+    AssertEqual(TunnelRunState.Running.ToString(), first.State.ToString());
+
+    var second = await orchestrator.StartAsync("kmdf");
+    AssertEqual(TunnelRunState.Running.ToString(), second.State.ToString());
+
+    await Task.Delay(120);
+
+    var statuses = orchestrator.GetStatus().Tunnels.ToDictionary(t => t.Id);
+    AssertEqual(TunnelRunState.Stopped.ToString(), statuses["managed"].State.ToString());
+    AssertEqual(TunnelRunState.Running.ToString(), statuses["kmdf"].State.ToString());
+    AssertTrue(
+        log.Snapshot().Any(e => e.Message.Contains("Ignored stale com0comService fault", StringComparison.OrdinalIgnoreCase)),
+        "A fault from a stopped same-endpoint tunnel should be ignored.");
+    AssertTrue(
+        !log.Snapshot().Any(e => e.Message.Contains("Scheduling com0comService restart", StringComparison.OrdinalIgnoreCase)),
+        "A stale stopped tunnel fault must not schedule a restart.");
 }
 
 static void Com0comServiceBackingOpenDiagnostics()
