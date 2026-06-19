@@ -25,9 +25,10 @@ Optional, depending on the backend you are working on:
 Run the managed build and tests before sending changes:
 
 ```powershell
-dotnet build VComTunnel.sln
-dotnet run --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
-scripts\smoke-local.ps1
+dotnet restore VComTunnel.sln
+dotnet build VComTunnel.sln --no-restore
+dotnet run --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj --no-restore
+powershell -ExecutionPolicy Bypass -File scripts\smoke-local.ps1
 ```
 
 For RFC2217 protocol work, prefer the fake server probe before touching real
@@ -38,6 +39,19 @@ dotnet run -c Release --project tools\VComTunnel.Smoke\VComTunnel.Smoke.csproj -
 ```
 
 Only add `--probe-controls` when the target is safe to reset or disturb.
+
+For Avalonia GUI work, run the headless GUI smoke check:
+
+```powershell
+dotnet run --project src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj --no-restore -- --smoke
+```
+
+When WSL is available, validate the Linux build without installing the .NET SDK
+inside WSL:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\smoke-avalonia-linux-wsl.ps1
+```
 
 ## Change Guidelines
 

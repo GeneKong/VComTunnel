@@ -7,7 +7,9 @@ return exitCode;
 internal static class VComTunnelCtl
 {
     private const string ServiceName = "VComTunnel";
-    private const string ServiceBaseUrl = "http://127.0.0.1:44817";
+    private const string DefaultServiceBaseUrl = "http://127.0.0.1:44817";
+    private static string ServiceBaseUrl =>
+        Environment.GetEnvironmentVariable("VCOMTUNNEL_SERVICE_URL") ?? DefaultServiceBaseUrl;
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -469,6 +471,9 @@ internal static class VComTunnelCtl
           deps install [--force] [--no-hub4com] [--no-com0com]
           deps launch-com0com      Launch downloaded com0com installer with UAC
           service install [serviceExe] | uninstall | start | stop
+
+        Environment:
+          VCOMTUNNEL_SERVICE_URL   Override the local service URL for API commands
         """);
         return 0;
     }
