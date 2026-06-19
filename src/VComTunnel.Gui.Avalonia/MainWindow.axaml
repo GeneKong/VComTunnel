@@ -1,0 +1,214 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="1280" d:DesignHeight="820"
+        x:Class="VComTunnel.Gui.Avalonia.MainWindow"
+        x:CompileBindings="False"
+        Title="VComTunnel"
+        Width="1280"
+        Height="820"
+        MinWidth="980"
+        MinHeight="660">
+    <Grid RowDefinitions="Auto,*,220" Margin="16">
+        <Border Grid.Row="0"
+                Padding="14"
+                BorderBrush="#D0D7DE"
+                BorderThickness="1"
+                CornerRadius="6"
+                Background="#F6F8FA">
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                <StackPanel Grid.Row="0" Grid.Column="0" Spacing="4">
+                    <TextBlock Text="{Binding ServiceHeadline}"
+                               FontSize="22"
+                               FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding ServiceDetail}"
+                               TextWrapping="Wrap"
+                               Foreground="#57606A" />
+                </StackPanel>
+
+                <StackPanel Grid.Row="0"
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            Spacing="8"
+                            Margin="12,0,0,0"
+                            VerticalAlignment="Center">
+                    <TextBox Width="340"
+                             Watermark="http://127.0.0.1:44817"
+                             Text="{Binding ServiceUrl, Mode=TwoWay}" />
+                    <Button Content="Apply"
+                            Command="{Binding ApplyServiceUrlCommand}" />
+                    <Button Content="Refresh"
+                            Command="{Binding RefreshCommand}" />
+                </StackPanel>
+
+                <TextBlock Grid.Row="1"
+                           Grid.ColumnSpan="2"
+                           Margin="0,10,0,0"
+                           Text="{Binding StatusText}"
+                           TextWrapping="Wrap" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1" ColumnDefinitions="1.35*,0.95*" Margin="0,12,0,0">
+            <Border Padding="12"
+                    BorderBrush="#D0D7DE"
+                    BorderThickness="1"
+                    CornerRadius="6">
+                <Grid RowDefinitions="Auto,*">
+                    <TextBlock Text="Tunnel mappings"
+                               FontSize="15"
+                               FontWeight="SemiBold" />
+                    <DockPanel Grid.Row="1" LastChildFill="True" Margin="0,10,0,0">
+                    <StackPanel DockPanel.Dock="Top"
+                                Orientation="Horizontal"
+                                Spacing="8"
+                                Margin="0,0,0,10">
+                        <Button Content="Add"
+                                Command="{Binding AddCommand}" />
+                        <Button Content="Delete"
+                                Command="{Binding DeleteCommand}" />
+                        <Button Content="Save"
+                                Command="{Binding SaveCommand}" />
+                        <Separator Width="1" />
+                        <Button Content="Start"
+                                Command="{Binding StartCommand}" />
+                        <Button Content="Stop"
+                                Command="{Binding StopCommand}" />
+                    </StackPanel>
+
+                    <ListBox ItemsSource="{Binding Mappings}"
+                             SelectedItem="{Binding SelectedMapping, Mode=TwoWay}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="90,*,155,110,*"
+                                      Margin="6">
+                                    <TextBlock Grid.Column="0"
+                                               Text="{Binding StateLabel}"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding Name}" />
+                                    <TextBlock Grid.Column="2"
+                                               Text="{Binding BackendLabel}" />
+                                    <TextBlock Grid.Column="3"
+                                               Text="{Binding VisiblePort}" />
+                                    <TextBlock Grid.Column="4"
+                                               Text="{Binding Endpoint}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    </DockPanel>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="1"
+                    Margin="12,0,0,0"
+                    Padding="12"
+                    BorderBrush="#D0D7DE"
+                    BorderThickness="1"
+                    CornerRadius="6">
+                <Grid RowDefinitions="Auto,*">
+                    <TextBlock Text="Selected mapping"
+                               FontSize="15"
+                               FontWeight="SemiBold" />
+                    <Grid Grid.Row="1"
+                          Margin="0,10,0,0"
+                          RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,*"
+                          ColumnDefinitions="120,*">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Name" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="0" Grid.Column="1"
+                             IsEnabled="{Binding HasSelectedMapping}"
+                             Text="{Binding SelectedMapping.Name, Mode=TwoWay}" />
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Backend" VerticalAlignment="Center" />
+                    <ComboBox Grid.Row="1" Grid.Column="1"
+                              IsEnabled="{Binding HasSelectedMapping}"
+                              ItemsSource="{Binding BackendOptions}"
+                              SelectedItem="{Binding SelectedMapping.Backend, Mode=TwoWay}" />
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Visible COM" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="2" Grid.Column="1"
+                             IsEnabled="{Binding HasSelectedMapping}"
+                             Text="{Binding SelectedMapping.VisiblePort, Mode=TwoWay}" />
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Backing" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="3" Grid.Column="1"
+                             IsEnabled="{Binding SelectedMappingAllowsBackingPort}"
+                             Watermark="empty for KMDF"
+                             Text="{Binding SelectedMapping.BackingPort, Mode=TwoWay}" />
+
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Host" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="4" Grid.Column="1"
+                             IsEnabled="{Binding HasSelectedMapping}"
+                             Text="{Binding SelectedMapping.Host, Mode=TwoWay}" />
+
+                    <TextBlock Grid.Row="5" Grid.Column="0" Text="Port" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="5" Grid.Column="1"
+                             IsEnabled="{Binding HasSelectedMapping}"
+                             Text="{Binding SelectedMapping.PortText, Mode=TwoWay}" />
+
+                    <TextBlock Grid.Row="6" Grid.Column="0" Text="Options" VerticalAlignment="Center" />
+                    <StackPanel Grid.Row="6" Grid.Column="1" Orientation="Horizontal" Spacing="18">
+                        <CheckBox Content="Auto start"
+                                  IsEnabled="{Binding HasSelectedMapping}"
+                                  IsChecked="{Binding SelectedMapping.AutoStart, Mode=TwoWay}" />
+                        <CheckBox Content="Restart"
+                                  IsEnabled="{Binding HasSelectedMapping}"
+                                  IsChecked="{Binding SelectedMapping.RestartOnFailure, Mode=TwoWay}" />
+                    </StackPanel>
+
+                    <TextBlock Grid.Row="7" Grid.Column="0" Text="Last error" VerticalAlignment="Top" />
+                    <TextBlock Grid.Row="7" Grid.Column="1"
+                               Text="{Binding SelectedMapping.LastError}"
+                               TextWrapping="Wrap"
+                               Foreground="#A23B2A" />
+
+                    <TextBlock Grid.Row="8" Grid.ColumnSpan="2"
+                               Text="{Binding SelectedMapping.Summary}"
+                               TextWrapping="Wrap"
+                               Foreground="#57606A"
+                               VerticalAlignment="Bottom" />
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <TabControl Grid.Row="2" Margin="0,12,0,0">
+            <TabItem Header="Logs">
+                <DockPanel Margin="0,10,0,0">
+                    <Button DockPanel.Dock="Top"
+                            HorizontalAlignment="Left"
+                            Margin="0,0,0,8"
+                            Content="Clear logs"
+                            Command="{Binding ClearLogsCommand}" />
+                    <TextBox Text="{Binding LogsText}"
+                             IsReadOnly="True"
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             FontFamily="Consolas"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+                </DockPanel>
+            </TabItem>
+            <TabItem Header="Dependencies">
+                <TextBox Margin="0,10,0,0"
+                         Text="{Binding DependenciesText}"
+                         IsReadOnly="True"
+                         AcceptsReturn="True"
+                         FontFamily="Consolas"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+            </TabItem>
+            <TabItem Header="Ports">
+                <TextBox Margin="0,10,0,0"
+                         Text="{Binding PortsText}"
+                         IsReadOnly="True"
+                         AcceptsReturn="True"
+                         FontFamily="Consolas"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+            </TabItem>
+        </TabControl>
+    </Grid>
+</Window>

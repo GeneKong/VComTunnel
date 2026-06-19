@@ -1,3 +1,4 @@
+using VComTunnel.Client;
 using VComTunnel.Core;
 using System.IO.Compression;
 using System.Net;
@@ -39,7 +40,9 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("fake com2tcp process restarts after exit", FakeCom2TcpProcessRestartsAfterExitAsync),
     ("manual stop suppresses fake com2tcp restart", ManualStopSuppressesFakeCom2TcpRestartAsync),
     ("dependency installer extracts tool zips", DependencyInstallerExtractsToolZipsAsync),
-    ("dependency installer uses bundled release archives", DependencyInstallerUsesBundledReleaseArchivesAsync)
+    ("dependency installer uses bundled release archives", DependencyInstallerUsesBundledReleaseArchivesAsync),
+    ("API client uses service JSON contract", ApiClientUsesServiceJsonContractAsync),
+    ("API client surfaces service errors", ApiClientSurfacesServiceErrorsAsync)
 };
 
 var failed = 0;
@@ -918,14 +921,18 @@ static async Task KmdfMappingReportsStartupFaultAsync()
     AssertStringContainsAny(status.LastError ?? "",
         "Could not open KMDF control channel",
         "KMDF driver protocol",
-        "Could not connect to RFC2217 endpoint");
+        "Could not connect to RFC2217 endpoint",
+        "请求的资源在使用中",
+        "resource is in use");
 
     var secondStatus = await orchestrator.StartAsync((await store.LoadAsync()).Mappings.Single().Id);
     AssertEqual(TunnelRunState.Faulted.ToString(), secondStatus.State.ToString());
     AssertStringContainsAny(secondStatus.LastError ?? "",
         "Could not open KMDF control channel",
         "KMDF driver protocol",
-        "Could not connect to RFC2217 endpoint");
+        "Could not connect to RFC2217 endpoint",
+        "请求的资源在使用中",
+        "resource is in use");
 }
 
 static async Task KmdfSessionRestartsAfterNetworkFaultAsync()
@@ -1222,6 +1229,55 @@ static async Task DependencyInstallerUsesBundledReleaseArchivesAsync()
     }
 }
 
+static async Task ApiClientUsesServiceJsonContractAsync()
+{
+    var handler = new RecordingApiHandler(request =>
+    {
+        if (request.Method == HttpMethod.Get && request.RequestUri?.PathAndQuery == "/api/mappings")
+        {
+            return JsonResponse("""[{"id":"m1","name":"Tunnel","backend":"com0comService","visiblePort":"COM27","backingPort":"CNCB27","host":"10.0.2.196","port":5000,"protocol":"rfc2217","autoStart":true,"restartOnFailure":true}]""");
+        }
+
+        if (request.Method == HttpMethod.Put && request.RequestUri?.PathAndQuery == "/api/mappings")
+        {
+            return JsonResponse("""{"saved":1}""");
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.NotFound);
+    });
+    using var http = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1:44817") };
+    using var client = new VComTunnelApiClient(http);
+
+    var mappings = await client.GetMappingsAsync();
+    AssertTrue(mappings.Count == 1, "expected one mapping");
+    AssertTrue(mappings[0].Backend == TunnelBackend.Com0comService, "expected com0comService backend");
+    await client.SaveMappingsAsync(mappings);
+
+    AssertStringContains(handler.LastPutBody, "\"backend\":\"com0comService\"");
+    AssertStringContains(handler.LastPutBody, "\"protocol\":\"rfc2217\"");
+}
+
+static async Task ApiClientSurfacesServiceErrorsAsync()
+{
+    using var http = new HttpClient(new RecordingApiHandler(_ =>
+        JsonResponse("""{"error":"mapping was not found"}""", HttpStatusCode.NotFound)))
+    {
+        BaseAddress = new Uri("http://127.0.0.1:44817")
+    };
+    using var client = new VComTunnelApiClient(http);
+
+    try
+    {
+        await client.StartMappingAsync("missing");
+        throw new InvalidOperationException("Expected API exception.");
+    }
+    catch (VComTunnelApiException ex)
+    {
+        AssertTrue(ex.StatusCode == HttpStatusCode.NotFound, "expected 404");
+        AssertStringContains(ex.Message, "mapping was not found");
+    }
+}
+
 static async Task<ConfigStore> StoreWithMappingAsync(string root, TunnelMapping mapping)
 {
     var store = new ConfigStore(Path.Combine(root, "config.json"));
@@ -1387,6 +1443,12 @@ static void CreateZip(string path, IReadOnlyDictionary<string, string> files)
     }
 }
 
+static HttpResponseMessage JsonResponse(string json, HttpStatusCode statusCode = HttpStatusCode.OK) =>
+    new(statusCode)
+    {
+        Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+    };
+
 internal sealed class TempDir : IDisposable
 {
     public TempDir()
@@ -1443,6 +1505,28 @@ internal sealed class ThrowingHandler : HttpMessageHandler
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         throw new InvalidOperationException("Network should not be used when bundled dependency archives are available.");
+    }
+}
+
+internal sealed class RecordingApiHandler : HttpMessageHandler
+{
+    private readonly Func<HttpRequestMessage, HttpResponseMessage> _handle;
+
+    public RecordingApiHandler(Func<HttpRequestMessage, HttpResponseMessage> handle)
+    {
+        _handle = handle;
+    }
+
+    public string LastPutBody { get; private set; } = "";
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (request.Method == HttpMethod.Put && request.Content is not null)
+        {
+            LastPutBody = await request.Content.ReadAsStringAsync(cancellationToken);
+        }
+
+        return _handle(request);
     }
 }
 

@@ -68,6 +68,19 @@ dotnet run --no-build --project tests\VComTunnel.Tests\VComTunnel.Tests.csproj
 scripts\smoke-local.ps1
 ```
 
+The `dev/avalonia-gui` branch also contains an experimental cross-platform
+Avalonia GUI and shared HTTP client:
+
+```powershell
+dotnet run --project src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj
+dotnet publish src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj -c Debug -r linux-x64 --self-contained false
+dotnet publish src\VComTunnel.Gui.Avalonia\VComTunnel.Gui.Avalonia.csproj -c Debug -r osx-arm64 --self-contained false
+scripts\build-avalonia-linux-wsl.ps1
+```
+
+See [docs/AVALONIA_GUI.md](docs/AVALONIA_GUI.md) for the current
+multi-platform GUI boundary and WSL validation notes.
+
 The KMDF smoke tool can exercise a test-installed `VComTunnel.Serial` port
 against a local fake RFC2217 echo server:
 
