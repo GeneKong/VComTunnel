@@ -46,7 +46,7 @@ public partial class MainWindow : Window
         ComPairsList.ItemsSource = _comPairs;
         ApplyLocalization();
         UpdateMappingCommandState();
-        _ = InitializeAsync();
+        Loaded += MainWindow_Loaded;
     }
 
     protected override void OnClosed(EventArgs e)
@@ -196,6 +196,19 @@ public partial class MainWindow : Window
 
     private async void StartSelectedMapping_Click(object sender, RoutedEventArgs e) => await PostSelectedAsync("start");
     private async void StopSelectedMapping_Click(object sender, RoutedEventArgs e) => await PostSelectedAsync("stop");
+
+    private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        Loaded -= MainWindow_Loaded;
+        try
+        {
+            await InitializeAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.InitialRefreshFailed", ex.Message), "error");
+        }
+    }
 
     private void EnglishLanguageMenuItem_Click(object sender, RoutedEventArgs e) => SetLanguage(UiLanguage.English);
 
@@ -1339,10 +1352,19 @@ public partial class MainWindow : Window
                 return;
             }
 
-            LaunchSetupcPlan(plan);
-            await RefreshComPairsListAsync(updateDetails: true);
+            if (!await RunSetupcPlanAsync(plan, TimeSpan.FromSeconds(60)))
+            {
+                return;
+            }
+
             SetStatus(T("Status.WaitingPairAppear"));
-            _ = PollCom0comPairsAfterSetupcAsync();
+            if (await WaitForPairAsync(row, TimeSpan.FromSeconds(45)))
+            {
+                SetStatus(TF("Status.CreatedPair", row.VisiblePort, row.BackingPort));
+                return;
+            }
+
+            SetStatus(T("Status.PairCreationNotDetected"), "warn");
         }
         catch (Exception ex)
         {
@@ -1433,7 +1455,11 @@ public partial class MainWindow : Window
                 return false;
             }
 
-            LaunchSetupcPlan(plan);
+            if (!await RunSetupcPlanAsync(plan, TimeSpan.FromSeconds(60)))
+            {
+                return false;
+            }
+
             await RefreshComPairsListAsync(updateDetails: true);
             SetStatus(TF("Status.WaitingPairRemoved", pair.PairNumber));
             _ = PollCom0comPairsAfterSetupcAsync(removedPairNumber: pair.PairNumber);
@@ -1446,18 +1472,56 @@ public partial class MainWindow : Window
         }
     }
 
-    private void LaunchSetupcPlan(SetupcCommandPlan plan)
+    private async Task<bool> RunSetupcPlanAsync(SetupcCommandPlan plan, TimeSpan timeout)
     {
-        Process.Start(new ProcessStartInfo
+        try
         {
-            FileName = plan.FileName,
-            Arguments = plan.Arguments,
-            WorkingDirectory = plan.WorkingDirectory ?? Path.GetDirectoryName(plan.FileName) ?? AppContext.BaseDirectory,
-            UseShellExecute = true,
-            Verb = plan.RequiresElevation ? "runas" : ""
-        });
+            SetStatus(TF("Status.SetupcStarting", plan.Arguments));
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = plan.FileName,
+                Arguments = plan.Arguments,
+                WorkingDirectory = plan.WorkingDirectory ?? Path.GetDirectoryName(plan.FileName) ?? AppContext.BaseDirectory,
+                UseShellExecute = true,
+                Verb = plan.RequiresElevation ? "runas" : ""
+            });
+            if (process is null)
+            {
+                SetStatus(T("Status.SetupcStartReturnedNull"), "error");
+                return false;
+            }
 
-        SetStatus(TF("Status.LaunchSetupc", plan.Arguments));
+            using var timeoutCts = new CancellationTokenSource(timeout);
+            try
+            {
+                await process.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                SetStatus(TF("Status.SetupcTimedOut", plan.Arguments, (int)timeout.TotalSeconds), "warn");
+                return false;
+            }
+
+            if (process.ExitCode != 0)
+            {
+                SetStatus(TF("Status.SetupcFailedExit", plan.Arguments, process.ExitCode), "error");
+                return false;
+            }
+
+            SetStatus(TF("Status.SetupcCompleted", plan.Arguments));
+            return true;
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            SetStatus(T("Status.SetupcCanceled"), "warn");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.SetupcLaunchFailed", ex.Message), "error");
+            return false;
+        }
+
     }
 
     private async Task<bool> EnsurePairExistsBeforeStartAsync(MappingRow row)
@@ -1500,7 +1564,11 @@ public partial class MainWindow : Window
             return false;
         }
 
-        LaunchSetupcPlan(plan);
+        if (!await RunSetupcPlanAsync(plan, TimeSpan.FromSeconds(60)))
+        {
+            return false;
+        }
+
         SetStatus(T("Status.WaitingPairAppear"));
         if (await WaitForPairAsync(row, TimeSpan.FromSeconds(45)))
         {
