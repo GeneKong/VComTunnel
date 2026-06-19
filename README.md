@@ -379,6 +379,12 @@ are accepted as no-op compatibility calls.
 Remaining hardening work is broader serial compatibility coverage and live ESP-DAP
 compatibility validation against real tools.
 
+The GUI does not install the KMDF driver during the normal dependency setup
+path. It only prompts for the experimental/test-signed driver when a user
+selects a `kmdf` mapping and explicitly creates or updates that KMDF port.
+Windows may require Test Mode and a reboot, and Secure Boot or driver signing
+policy can block installation.
+
 ## Safety and Security
 
 - The local API is intended for loopback use at `127.0.0.1:44817`.

@@ -29,6 +29,8 @@ opening a public issue with exploit details. Include:
   authentication or encryption.
 - Run the service with the minimum privileges required for the selected backend.
 - Install the KMDF prototype only on test machines where recovery is possible.
+  It is an experimental/test-signed driver path; Windows may require Test Mode
+  and a reboot, and Secure Boot or driver signing policy can block installation.
 - Review DTR/RTS/BREAK/purge behavior before connecting boards that reset or
   enter boot modes through serial-control lines.
 

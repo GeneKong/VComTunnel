@@ -497,9 +497,9 @@ internal static class VComTunnelCtl
           pair create-plan <id>    Print setupc plan for one mapping
           pair remove-plan <n>     Print setupc remove plan for pair number n
           kmdf list                List VComTunnel KMDF COM ports
-          kmdf add COMx [inf]      Create a KMDF COM port with administrator approval
+          kmdf add COMx [inf]      Create an experimental KMDF COM port with administrator approval
           kmdf remove COMx         Remove a KMDF COM port with administrator approval
-          kmdf update COMx [inf]   Update an existing KMDF COM port driver
+          kmdf update COMx [inf]   Update an existing experimental KMDF COM port driver
           start <mappingId>        Start one configured mapping
           stop <mappingId>         Stop one configured mapping
           logs                     Read /api/logs from the local service
@@ -531,6 +531,7 @@ internal static class VComTunnelCtl
     private static int KmdfHelp()
     {
         Console.WriteLine("Usage: vcomtunnelctl kmdf list | add COM27 [driver-inf] | remove COM27 | update COM27 [driver-inf] | inf [driver-inf]");
+        Console.WriteLine(KmdfDeviceManager.TestSignedDriverPolicyHint);
         return 0;
     }
 

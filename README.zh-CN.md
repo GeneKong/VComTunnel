@@ -259,6 +259,10 @@ drivers\VComTunnel.Serial\install-test-driver.ps1
 注意：测试签名驱动只适合开发验证。正式发布需要走 Microsoft 驱动签名流程，
 否则普通 Windows 机器无法按生产方式安装。
 
+GUI 的“安装依赖”不会自动安装 KMDF 驱动。只有用户主动选择 `kmdf` 映射，并创建
+或更新该 KMDF 端口时，才会显示实验性/测试签名驱动确认提示。Windows 可能需要
+启用测试签名模式并重启；开启 Secure Boot 或驱动签名策略可能会阻止安装。
+
 ## RFC2217 验证
 
 可以使用 smoke 工具直接探测 RFC2217 endpoint：

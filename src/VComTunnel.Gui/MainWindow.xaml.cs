@@ -1603,12 +1603,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var answer = MessageBox.Show(
-            TF("Prompt.CreateKmdfPort", row.VisiblePort),
-            T("Title.KmdfPort"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question);
-        if (answer != MessageBoxResult.Yes)
+        if (!ConfirmKmdfDriverOperation(TF("Prompt.CreateKmdfPort", row.VisiblePort)))
         {
             return;
         }
@@ -1707,12 +1702,7 @@ public partial class MainWindow : Window
 
     private async Task PromptUpdateKmdfDriverAfterProtocolFaultAsync(MappingRow row, string lastError)
     {
-        var answer = MessageBox.Show(
-            TF("Prompt.UpdateKmdfDriverAfterFault", row.VisiblePort, lastError),
-            T("Title.KmdfPort"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-        if (answer != MessageBoxResult.Yes)
+        if (!ConfirmKmdfDriverOperation(TF("Prompt.UpdateKmdfDriverAfterFault", row.VisiblePort, lastError)))
         {
             return;
         }
@@ -1729,12 +1719,7 @@ public partial class MainWindow : Window
         var normalizedPortName = KmdfDeviceManager.NormalizePortName(portName);
         if (confirm)
         {
-            var answer = MessageBox.Show(
-                TF("Prompt.UpdateKmdfDriver", normalizedPortName),
-                T("Title.KmdfPort"),
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (answer != MessageBoxResult.Yes)
+            if (!ConfirmKmdfDriverOperation(TF("Prompt.UpdateKmdfDriver", normalizedPortName)))
             {
                 return false;
             }
@@ -1776,12 +1761,7 @@ public partial class MainWindow : Window
         }
 
         DependenciesText.Text = FormatComPortInventory(await RefreshComPairsListAsync(updateDetails: false), devices);
-        var answer = MessageBox.Show(
-            TF("Prompt.MissingKmdfPort", row.VisiblePort),
-            T("Title.KmdfPort"),
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question);
-        if (answer != MessageBoxResult.Yes)
+        if (!ConfirmKmdfDriverOperation(TF("Prompt.MissingKmdfPort", row.VisiblePort)))
         {
             SetStatus(TF("Status.StartCanceledMissingKmdfPort", row.VisiblePort), "warn");
             return false;
@@ -1803,6 +1783,17 @@ public partial class MainWindow : Window
 
         SetStatus(wait.FailureMessage ?? TF("Status.KmdfPortCreationNotDetected", row.VisiblePort), "warn");
         return false;
+    }
+
+    private bool ConfirmKmdfDriverOperation(string operationPrompt)
+    {
+        var message = $"{operationPrompt.TrimEnd()}\r\n\r\n{T("Prompt.KmdfExperimentalDriverWarning")}";
+        var answer = MessageBox.Show(
+            message,
+            T("Title.KmdfPort"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+        return answer == MessageBoxResult.Yes;
     }
 
     private KmdfCtlLaunch? LaunchKmdfCtl(string action, string portName)
