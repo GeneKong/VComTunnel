@@ -345,7 +345,14 @@ This establishes the data/Telnet bridge but does not install the DTR, RTS,
 BREAK, or line-control forwarding filters. Mapping start, `autoStart`, and
 service recovery therefore do not implicitly reset a target or put it into a
 bootloader. Target reset and bootloader entry should come from an explicit
-future control action instead of the default tunnel start path.
+tool action instead of the default tunnel start path.
+
+Set `hub4comForwardControlLines: true` on a `com0comHub4com` mapping only when
+the target expects RFC2217 control-line forwarding through hub4com. That mode
+adds the same `pinmap` and `linectl` filters used by `com2tcp-rfc2217.bat`, so
+RTS/DTR/BREAK and line-control changes can reach the target. It also means the
+hub4com path no longer has VComTunnel's startup-only suppression hook; validate
+it on hardware that can tolerate the initial line state.
 
 ## Phase 1 real device bring-up
 

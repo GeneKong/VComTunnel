@@ -236,6 +236,19 @@ public sealed class Rfc2217Client
         return escaped.ToArray();
     }
 
+    public static bool RequiresSerialDataEscaping(byte[] buffer, int offset, int length)
+    {
+        for (var i = 0; i < length; i++)
+        {
+            if (buffer[offset + i] == Iac)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static byte[] BuildSetBaudRate(uint baudRate)
     {
         return BuildSubnegotiation(SetBaudRate,

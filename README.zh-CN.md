@@ -183,6 +183,12 @@ BREAK 和 line-control 转发过滤器的 hub4com 启动方式，避免手动启
 开机或后台服务恢复时把目标复位或拉进 bootloader。需要 BOOT/RESET 时，应由
 后续显式控制动作触发 DTR/RTS，而不是由默认隧道启动隐式完成。
 
+如果确实需要让 hub4com 路径转发控制线，可以在 `com0comHub4com` 映射里设置
+`hub4comForwardControlLines: true`。该模式会加入与 `com2tcp-rfc2217.bat`
+一致的 `pinmap` 和 `linectl` 过滤器，RTS/DTR/BREAK 以及 line-control 改动
+都可能到达目标设备。这个模式不具备 VComTunnel 自己后端的“只抑制启动同步”
+钩子，启用前应先在能承受初始控制线状态的硬件上验证。
+
 ## 发布安装文件
 
 当前仓库已经提供发布脚本。以下是已验证的 Windows portable 打包命令，输出

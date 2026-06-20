@@ -18,6 +18,7 @@ public sealed class TunnelOrchestrator
     private readonly ConcurrentDictionary<string, string> _lastProcessErrors = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _restartVersions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<int, byte> _intentionalProcessStops = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _mappingLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
     public TunnelOrchestrator(
@@ -70,6 +71,20 @@ public sealed class TunnelOrchestrator
     }
 
     public async Task<TunnelStatus> StartAsync(string id, CancellationToken cancellationToken = default)
+    {
+        var mappingLock = GetMappingLock(id);
+        await mappingLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await StartCoreAsync(id, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            mappingLock.Release();
+        }
+    }
+
+    private async Task<TunnelStatus> StartCoreAsync(string id, CancellationToken cancellationToken)
     {
         var config = await _configStore.LoadAsync(cancellationToken);
         var mapping = config.Mappings.FirstOrDefault(m => string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase))
@@ -149,7 +164,11 @@ public sealed class TunnelOrchestrator
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        _log.Info(mapping.Name, "Started no-control-lines hub4com bridge; DTR/RTS/BREAK are not forwarded by default.");
+        _log.Info(
+            mapping.Name,
+            mapping.Hub4comForwardControlLines
+                ? "Started hub4com bridge with control-line forwarding enabled; DTR/RTS/BREAK and line-control changes may reach the target."
+                : "Started no-control-lines hub4com bridge; DTR/RTS/BREAK are not forwarded by default.");
 
         var tunnel = new ManagedTunnel(mapping, TunnelRunState.Running, process, null, DateTimeOffset.UtcNow, null);
         _tunnels[id] = tunnel;
@@ -166,15 +185,24 @@ public sealed class TunnelOrchestrator
 
     public TunnelStatus Stop(string id)
     {
-        var mapping = _tunnels.TryGetValue(id, out var existing)
-            ? existing.Mapping
-            : new TunnelMapping { Id = id };
-        StopExisting(id);
-        _lastProcessErrors.TryRemove(id, out _);
-        var stopped = new ManagedTunnel(mapping, TunnelRunState.Stopped, null, null, null, null);
-        _tunnels[id] = stopped;
-        _log.Info(mapping.Name, "Stopped.");
-        return stopped.ToStatus();
+        var mappingLock = GetMappingLock(id);
+        mappingLock.Wait();
+        try
+        {
+            var mapping = _tunnels.TryGetValue(id, out var existing)
+                ? existing.Mapping
+                : new TunnelMapping { Id = id };
+            StopExisting(id);
+            _lastProcessErrors.TryRemove(id, out _);
+            var stopped = new ManagedTunnel(mapping, TunnelRunState.Stopped, null, null, null, null);
+            _tunnels[id] = stopped;
+            _log.Info(mapping.Name, "Stopped.");
+            return stopped.ToStatus();
+        }
+        finally
+        {
+            mappingLock.Release();
+        }
     }
 
     public ServiceStatus GetStatus()
@@ -469,6 +497,11 @@ public sealed class TunnelOrchestrator
     private long GetRestartVersion(string id)
     {
         return _restartVersions.GetOrAdd(id, 0);
+    }
+
+    private SemaphoreSlim GetMappingLock(string id)
+    {
+        return _mappingLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
     }
 
     private void BumpRestartVersion(string id)

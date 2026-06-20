@@ -16,6 +16,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("service endpoint rejects non-loopback override", () => Task.Run(ServiceEndpointRejectsNonLoopbackOverride)),
     ("com0com create hints", () => Task.Run(Com0comCreateHints)),
     ("com0com service maps peer modem signals", () => Task.Run(Com0comServiceMapsPeerModemSignals)),
+    ("com0com service reconstructs fast RTS pulse", () => Task.Run(Com0comServiceReconstructsFastRtsPulse)),
     ("esptool baud monitor waits for response", () => Task.Run(EspToolBaudMonitorWaitsForResponse)),
     ("KMDF control path uses visible COM", () => Task.Run(KmdfControlPathUsesVisibleCom)),
     ("KMDF pnputil CSV parser finds VComTunnel ports", () => Task.Run(KmdfPnpUtilCsvParserFindsPorts)),
@@ -27,10 +28,12 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("RFC2217 notification mappings", () => Task.Run(Rfc2217NotificationMappings)),
     ("RFC2217 local flow-control depth", () => Task.Run(Rfc2217LocalFlowControlDepth)),
     ("hub4com default command avoids control filters", () => Task.Run(Hub4comDefaultCommandAvoidsControlFilters)),
+    ("hub4com control command enables control filters", () => Task.Run(Hub4comControlCommandEnablesControlFilters)),
     ("missing dependencies fault mapping", MissingDependenciesFaultMappingAsync),
     ("missing backing port faults before hub4com", MissingBackingPortFaultsBeforeHub4comAsync),
     ("com0com service backend starts without hub4com", Com0comServiceBackendStartsWithoutHub4comAsync),
     ("com0com service backend restarts after network fault", Com0comServiceBackendRestartsAfterNetworkFaultAsync),
+    ("com0com service start requests are serialized", Com0comServiceStartRequestsAreSerializedAsync),
     ("starting same endpoint stops prior tunnel", StartingSameEndpointStopsPriorTunnelAsync),
     ("stale stopped session fault is ignored", StaleStoppedSessionFaultIsIgnoredAsync),
     ("com0com service backing open diagnostics", () => Task.Run(Com0comServiceBackingOpenDiagnostics)),
@@ -157,7 +160,7 @@ static async Task ConfigRoundTripAsync()
     {
         Mappings =
         [
-            new TunnelMapping { Name = "RoundTrip", VisiblePort = "COM33", BackingPort = "CNCB33", Host = "127.0.0.1", Port = 2217, AutoStart = true }
+            new TunnelMapping { Name = "RoundTrip", VisiblePort = "COM33", BackingPort = "CNCB33", Host = "127.0.0.1", Port = 2217, Hub4comForwardControlLines = true, AutoStart = true }
         ]
     };
 
@@ -165,6 +168,7 @@ static async Task ConfigRoundTripAsync()
     var loaded = await store.LoadAsync();
     AssertEqual("RoundTrip", loaded.Mappings.Single().Name);
     AssertEqual("COM33", loaded.Mappings.Single().VisiblePort);
+    AssertTrue(loaded.Mappings.Single().Hub4comForwardControlLines, "hub4com control-line mode should round-trip.");
     AssertTrue(loaded.Mappings.Single().AutoStart, "AutoStart should round-trip.");
 }
 
@@ -239,6 +243,19 @@ static void Com0comServiceMapsPeerModemSignals()
     AssertTrue(
         Com0comServiceTunnelSession.MapCom0comPeerRts(SerialPortSnapshot.Cts),
         "Backing CTS should map to visible-side RTS on.");
+}
+
+static void Com0comServiceReconstructsFastRtsPulse()
+{
+    AssertBytes(
+        Concat(
+            Rfc2217Client.BuildSetModemControl(null, true),
+            Rfc2217Client.BuildSetModemControl(null, false)),
+        Com0comServiceTunnelSession.BuildCom0comPeerModemControlFrames(0, 0, SerialPortSnapshot.EventCts));
+
+    AssertBytes(
+        Rfc2217Client.BuildSetModemControl(null, true),
+        Com0comServiceTunnelSession.BuildCom0comPeerModemControlFrames(0, SerialPortSnapshot.Cts, SerialPortSnapshot.EventCts));
 }
 
 static void EspToolBaudMonitorWaitsForResponse()
@@ -346,6 +363,12 @@ static void Rfc2217CommandEncoding()
     AssertBytes(
         [0x56, 0xFF, 0xFF, 0x43],
         Rfc2217Client.EscapeSerialData([0x56, 0xFF, 0x43], 0, 3));
+    AssertTrue(
+        !Rfc2217Client.RequiresSerialDataEscaping([0x56, 0x43], 0, 2),
+        "Serial data without IAC should use the zero-copy write path.");
+    AssertTrue(
+        Rfc2217Client.RequiresSerialDataEscaping([0x56, 0xFF, 0x43], 0, 3),
+        "Serial data containing IAC must still be escaped.");
 
     AssertBytes(
         [0xFF, 0xF1],
@@ -713,6 +736,28 @@ static void Hub4comDefaultCommandAvoidsControlFilters()
     AssertTrue(!command.Arguments.Contains("break=break", StringComparison.OrdinalIgnoreCase), "Default command must not map BREAK.");
 }
 
+static void Hub4comControlCommandEnablesControlFilters()
+{
+    using var temp = new TempDir();
+    CreateFakeDependencies(temp.Path);
+    var detector = new DependencyDetector([temp.Path], pathOverride: "");
+    var command = new Hub4comCommandBuilder(detector).Build(new TunnelMapping
+    {
+        BackingPort = "CNCB12",
+        Host = "192.168.1.50",
+        Port = 3333,
+        Hub4comForwardControlLines = true
+    });
+
+    AssertStringContains(command.Arguments, "--create-filter=pinmap,com,pinmap");
+    AssertStringContains(command.Arguments, "--create-filter=linectl,com,lc");
+    AssertStringContains(command.Arguments, "--create-filter=pinmap,tcp,pinmap");
+    AssertStringContains(command.Arguments, "--create-filter=linectl,tcp,lc");
+    AssertStringContains(command.Arguments, "--rts=cts");
+    AssertStringContains(command.Arguments, "--dtr=dsr");
+    AssertStringContains(command.Arguments, "--break=break");
+}
+
 static async Task MissingDependenciesFaultMappingAsync()
 {
     using var temp = new TempDir();
@@ -821,6 +866,71 @@ static async Task Com0comServiceBackendRestartsAfterNetworkFaultAsync()
     AssertTrue(
         log.Snapshot().Any(e => e.Message.Contains("Scheduling Com0comService restart", StringComparison.OrdinalIgnoreCase)),
         "com0com service network fault should schedule a restart.");
+}
+
+static async Task Com0comServiceStartRequestsAreSerializedAsync()
+{
+    using var temp = new TempDir();
+    var mapping = new TunnelMapping
+    {
+        Name = "Serialized managed com0com",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM32",
+        BackingPort = "CNCB32",
+        Host = "127.0.0.1",
+        Port = 5000,
+        RestartOnFailure = true
+    };
+    var store = await StoreWithMappingAsync(temp.Path, mapping);
+    var firstStartEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseFirstStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var starts = 0;
+    var activeStarts = 0;
+    var maxActiveStarts = 0;
+    var disposed = 0;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        new InMemoryLog(),
+        ["COM32", "CNCB32"],
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            var startNumber = Interlocked.Increment(ref starts);
+            return new DelayedManagedTunnelSession(
+                async cancellationToken =>
+                {
+                    var active = Interlocked.Increment(ref activeStarts);
+                    UpdateMax(ref maxActiveStarts, active);
+                    try
+                    {
+                        if (startNumber == 1)
+                        {
+                            firstStartEntered.SetResult();
+                            await releaseFirstStart.Task.WaitAsync(cancellationToken);
+                        }
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref activeStarts);
+                    }
+                },
+                () => Interlocked.Increment(ref disposed));
+        });
+
+    var id = (await store.LoadAsync()).Mappings.Single().Id;
+    var firstStart = orchestrator.StartAsync(id);
+    await firstStartEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    var secondStart = orchestrator.StartAsync(id);
+
+    await Task.Delay(50);
+    AssertEqual("1", Volatile.Read(ref starts).ToString());
+
+    releaseFirstStart.SetResult();
+    await Task.WhenAll(firstStart, secondStart);
+
+    AssertEqual("2", Volatile.Read(ref starts).ToString());
+    AssertEqual("1", Volatile.Read(ref maxActiveStarts).ToString());
+    AssertTrue(Volatile.Read(ref disposed) >= 1, "Second start should stop the first managed session before replacing it.");
 }
 
 static async Task StartingSameEndpointStopsPriorTunnelAsync()
@@ -1589,6 +1699,8 @@ static byte[] SlipFrame(params byte[] payload)
     return bytes.ToArray();
 }
 
+static byte[] Concat(params byte[][] chunks) => chunks.SelectMany(chunk => chunk).ToArray();
+
 static void AssertRfc2217Notifications(byte[] frame, params Rfc2217Notification[] expected)
 {
     var actual = new Rfc2217Client().ProcessNetworkBytes(frame, frame.Length).Notifications;
@@ -1605,6 +1717,18 @@ static void AssertTrue(bool condition, string message)
     if (!condition)
     {
         throw new Exception(message);
+    }
+}
+
+static void UpdateMax(ref int target, int value)
+{
+    while (true)
+    {
+        var current = Volatile.Read(ref target);
+        if (value <= current || Interlocked.CompareExchange(ref target, value, current) == current)
+        {
+            return;
+        }
     }
 }
 
@@ -1773,6 +1897,36 @@ internal sealed class FakeManagedTunnelSession : IManagedTunnelSession
 
     public void Dispose()
     {
+        if (LastError is null)
+        {
+            State = TunnelRunState.Stopped;
+        }
+    }
+}
+
+internal sealed class DelayedManagedTunnelSession : IManagedTunnelSession
+{
+    private readonly Func<CancellationToken, Task> _startAsync;
+    private readonly Action _disposed;
+
+    public DelayedManagedTunnelSession(Func<CancellationToken, Task> startAsync, Action disposed)
+    {
+        _startAsync = startAsync;
+        _disposed = disposed;
+    }
+
+    public TunnelRunState State { get; private set; } = TunnelRunState.Starting;
+    public string? LastError { get; private set; }
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        await _startAsync(cancellationToken);
+        State = TunnelRunState.Running;
+    }
+
+    public void Dispose()
+    {
+        _disposed();
         if (LastError is null)
         {
             State = TunnelRunState.Stopped;

@@ -33,6 +33,7 @@ public sealed record TunnelMapping
     public string Host { get; init; } = "127.0.0.1";
     public int Port { get; init; } = 5000;
     public TunnelProtocol Protocol { get; init; } = TunnelProtocol.Rfc2217;
+    public bool Hub4comForwardControlLines { get; init; }
     public bool AutoStart { get; init; }
     public bool RestartOnFailure { get; init; } = true;
     [JsonIgnore]

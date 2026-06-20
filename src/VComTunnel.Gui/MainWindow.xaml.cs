@@ -126,6 +126,7 @@ public partial class MainWindow : Window
         BackingColumn.Header = T("Column.Backing");
         HostColumn.Header = T("Column.Host");
         PortColumn.Header = T("Column.Port");
+        Hub4comControlsColumn.Header = T("Column.Hub4comControls");
         AutoColumn.Header = T("Column.Auto");
         RestartColumn.Header = T("Column.Restart");
         MappingStateColumn.Header = T("Column.State");
@@ -403,6 +404,7 @@ public partial class MainWindow : Window
             BackingPort = $"CNCB{portNumber}",
             Host = "127.0.0.1",
             Port = 5000,
+            Hub4comForwardControlLines = true,
             AutoStart = false,
             RestartOnFailure = true,
             StateLabel = GuiText.State(_language, TunnelRunState.Stopped)
@@ -2962,6 +2964,7 @@ public sealed class MappingRow : INotifyPropertyChanged
 
     public string Host { get; set; } = "";
     public int Port { get; set; }
+    public bool Hub4comForwardControlLines { get; set; }
     public bool AutoStart
     {
         get => _autoStart;
@@ -3053,6 +3056,7 @@ public sealed class MappingRow : INotifyPropertyChanged
             BackingPort = mapping.BackingPort,
             Host = mapping.Host,
             Port = mapping.Port,
+            Hub4comForwardControlLines = mapping.Hub4comForwardControlLines,
             AutoStart = mapping.AutoStart,
             RestartOnFailure = mapping.RestartOnFailure,
             RunState = TunnelRunState.Stopped
@@ -3100,6 +3104,7 @@ public sealed class MappingRow : INotifyPropertyChanged
             BackingPort = backend == TunnelBackend.Kmdf ? null : BackingPort,
             Host = Host,
             Port = Port,
+            Hub4comForwardControlLines = Hub4comForwardControlLines,
             AutoStart = AutoStart,
             RestartOnFailure = RestartOnFailure
         };

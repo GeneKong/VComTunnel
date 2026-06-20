@@ -13,7 +13,8 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private const byte StartupByteSize = 8;
     private const byte StartupParity = 0;
     private const byte StartupStopBits = 0;
-    private static readonly TimeSpan SerialStatePollInterval = TimeSpan.FromMilliseconds(10);
+    private static readonly TimeSpan SerialModemPollInterval = TimeSpan.FromMilliseconds(2);
+    private static readonly TimeSpan SerialSettingsPollInterval = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan CommandAckTimeout = Rfc2217Client.RecommendedCommandAckTimeout;
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan KeepAlivePollInterval = TimeSpan.FromSeconds(5);
@@ -28,6 +29,9 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private readonly List<Rfc2217ExpectedAck> _pendingAcks = [];
     private readonly object _flowLock = new();
     private readonly SemaphoreSlim _networkWriteLock = new(1, 1);
+    private readonly ThroughputLogThrottle _serialTxLog = new(TimeSpan.FromSeconds(1));
+    private readonly ThroughputLogThrottle _serialRxLog = new(TimeSpan.FromSeconds(1));
+    private readonly object _serialStateLock = new();
     private readonly CancellationTokenSource _stop = new();
     private TaskCompletionSource? _pendingAckCompletion;
     private TaskCompletionSource? _flowResumeCompletion;
@@ -36,9 +40,12 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private ISerialPortEndpoint? _serial;
     private TcpClient? _tcp;
     private Task? _serialLoop;
-    private Task? _serialStateLoop;
+    private Task? _serialModemLoop;
+    private Task? _serialSettingsLoop;
     private Task? _networkLoop;
     private Task? _keepAliveLoop;
+    private SerialPortSnapshot? _lastSerialSnapshot;
+    private bool _pollModemState;
     private int _disposed;
 
     public Com0comServiceTunnelSession(
@@ -115,8 +122,23 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         State = TunnelRunState.Running;
         _log.Info(_mapping.Name, $"Started com0com service tunnel {_mapping.BackingPort} -> {_mapping.Host}:{_mapping.Port}.");
 
+        lock (_serialStateLock)
+        {
+            _lastSerialSnapshot = _serial.GetSnapshot();
+        }
+
+        _pollModemState = !_serial.SupportsModemStatusEvents;
+        if (_pollModemState)
+        {
+            _log.Warn(_mapping.Name, $"Serial modem-control events are unavailable; falling back to {SerialModemPollInterval.TotalMilliseconds:0} ms polling for DTR/RTS.");
+        }
+        else
+        {
+            _serialModemLoop = Task.Run(SerialModemEventLoopAsync);
+        }
+
         _serialLoop = Task.Run(SerialLoopAsync);
-        _serialStateLoop = Task.Run(SerialStateLoopAsync);
+        _serialSettingsLoop = Task.Run(SerialSettingsLoopAsync);
         _keepAliveLoop = Task.Run(KeepAliveLoopAsync);
     }
 
@@ -155,8 +177,16 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                 }
 
                 await WaitForRemoteFlowAsync().ConfigureAwait(false);
-                await WriteNetworkAsync(stream, Rfc2217Client.EscapeSerialData(buffer, 0, read)).ConfigureAwait(false);
-                _log.Info(_mapping.Name, $"Serial TX {read} byte(s) from {_mapping.BackingPort}.");
+                if (Rfc2217Client.RequiresSerialDataEscaping(buffer, 0, read))
+                {
+                    await WriteNetworkAsync(stream, Rfc2217Client.EscapeSerialData(buffer, 0, read)).ConfigureAwait(false);
+                }
+                else
+                {
+                    await WriteNetworkAsync(stream, buffer.AsMemory(0, read)).ConfigureAwait(false);
+                }
+
+                LogSerialTx(read);
             }
         }
         catch (Exception ex) when (!_stop.IsCancellationRequested)
@@ -165,31 +195,21 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         }
     }
 
-    private async Task SerialStateLoopAsync()
+    private async Task SerialModemEventLoopAsync()
     {
         try
         {
             var stream = _tcp!.GetStream();
-            SerialPortSnapshot? previous = null;
             while (!_stop.IsCancellationRequested)
             {
-                var current = _serial!.GetSnapshot();
-                if (previous is not null)
+                var eventMask = _serial!.WaitForModemStatusChange(_stop.Token);
+                var currentModemStatus = _serial.GetModemStatus();
+                var frame = UpdateSerialModemState(currentModemStatus, eventMask);
+                if (frame.Bytes.Length > 0)
                 {
-                    var frame = BuildStateChangeFrame(previous.Value, current);
-                    if (frame.Bytes.Length > 0)
-                    {
-                        await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
-                        _log.Info(_mapping.Name, frame.Description);
-                    }
-                    else if (previous.Value.ModemStatus != current.ModemStatus)
-                    {
-                        _log.Info(_mapping.Name, $"Serial modem state raw 0x{previous.Value.ModemStatus:X8} -> 0x{current.ModemStatus:X8} without RFC2217 mapping.");
-                    }
+                    await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
+                    _log.Info(_mapping.Name, frame.Description);
                 }
-
-                previous = current;
-                await Task.Delay(SerialStatePollInterval, _stop.Token).ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (!_stop.IsCancellationRequested)
@@ -198,7 +218,99 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         }
     }
 
+    private async Task SerialSettingsLoopAsync()
+    {
+        try
+        {
+            var stream = _tcp!.GetStream();
+            while (!_stop.IsCancellationRequested)
+            {
+                var frame = _pollModemState
+                    ? UpdateSerialStateFromPoll(_serial!.GetSnapshot())
+                    : UpdateSerialSettings(_serial!.GetSettings());
+                if (frame.Bytes.Length > 0)
+                {
+                    await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
+                    _log.Info(_mapping.Name, frame.Description);
+                }
+
+                await Task.Delay(_pollModemState ? SerialModemPollInterval : SerialSettingsPollInterval, _stop.Token).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (!_stop.IsCancellationRequested)
+        {
+            Fault(ex);
+        }
+    }
+
+    private Rfc2217OutboundFrame UpdateSerialStateFromPoll(SerialPortSnapshot current)
+    {
+        lock (_serialStateLock)
+        {
+            if (_lastSerialSnapshot is not { } previous)
+            {
+                _lastSerialSnapshot = current;
+                return new Rfc2217OutboundFrame([], [], "serial state baseline");
+            }
+
+            _lastSerialSnapshot = current;
+            return BuildStateChangeFrame(previous, current, SerialPortSnapshot.EventNone);
+        }
+    }
+
+    private Rfc2217OutboundFrame UpdateSerialSettings(SerialPortSettings settings)
+    {
+        lock (_serialStateLock)
+        {
+            if (_lastSerialSnapshot is not { } previous)
+            {
+                _lastSerialSnapshot = new SerialPortSnapshot(0, settings.BaudRate, settings.ByteSize, settings.Parity, settings.StopBits);
+                return new Rfc2217OutboundFrame([], [], "serial settings baseline");
+            }
+
+            var current = previous with
+            {
+                BaudRate = settings.BaudRate,
+                ByteSize = settings.ByteSize,
+                Parity = settings.Parity,
+                StopBits = settings.StopBits
+            };
+            _lastSerialSnapshot = current;
+            return BuildSettingsChangeFrame(previous, current);
+        }
+    }
+
+    private Rfc2217OutboundFrame UpdateSerialModemState(uint currentModemStatus, uint eventMask)
+    {
+        lock (_serialStateLock)
+        {
+            if (_lastSerialSnapshot is not { } previous)
+            {
+                _lastSerialSnapshot = new SerialPortSnapshot(currentModemStatus, 0, 0, 0, 0);
+                return new Rfc2217OutboundFrame([], [], "serial modem baseline");
+            }
+
+            var current = previous with { ModemStatus = currentModemStatus };
+            _lastSerialSnapshot = current;
+            return BuildModemChangeFrame(previous, current, eventMask);
+        }
+    }
+
     private static Rfc2217OutboundFrame BuildStateChangeFrame(SerialPortSnapshot previous, SerialPortSnapshot current)
+    {
+        return CombineFrames(
+            BuildSettingsChangeFrame(previous, current),
+            BuildModemChangeFrame(previous, current, SerialPortSnapshot.EventNone));
+    }
+
+    private static Rfc2217OutboundFrame BuildStateChangeFrame(SerialPortSnapshot previous, SerialPortSnapshot current, uint eventMask)
+    {
+        return CombineFrames(
+            BuildSettingsChangeFrame(previous, current),
+            BuildModemChangeFrame(previous, current, eventMask));
+    }
+
+    private static Rfc2217OutboundFrame BuildSettingsChangeFrame(SerialPortSnapshot previous, SerialPortSnapshot current)
     {
         var frames = new List<byte[]>();
         var descriptions = new List<string>();
@@ -217,6 +329,13 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             descriptions.Add($"line data={current.ByteSize}, parity={current.Parity}, stop={current.StopBits}");
         }
 
+        return BuildFrame(frames, descriptions);
+    }
+
+    private static Rfc2217OutboundFrame BuildModemChangeFrame(SerialPortSnapshot previous, SerialPortSnapshot current, uint eventMask)
+    {
+        var frames = new List<byte[]>();
+        var descriptions = new List<string>();
         var previousDtr = MapCom0comPeerDtr(previous.ModemStatus);
         var currentDtr = MapCom0comPeerDtr(current.ModemStatus);
         var previousRts = MapCom0comPeerRts(previous.ModemStatus);
@@ -228,18 +347,61 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             frames.Add(Rfc2217Client.BuildSetModemControl(dtr, rts));
             descriptions.Add($"modem raw=0x{previous.ModemStatus:X8}->0x{current.ModemStatus:X8}, dtr={dtr?.ToString() ?? "-"}, rts={rts?.ToString() ?? "-"}");
         }
+        else
+        {
+            var missedDtrPulse = (eventMask & SerialPortSnapshot.EventDsr) != 0 && previousDtr == currentDtr;
+            var missedRtsPulse = (eventMask & SerialPortSnapshot.EventCts) != 0 && previousRts == currentRts;
+            if (missedDtrPulse || missedRtsPulse)
+            {
+                var pulseDtr = missedDtrPulse ? !currentDtr : (bool?)null;
+                var pulseRts = missedRtsPulse ? !currentRts : (bool?)null;
+                var restoreDtr = missedDtrPulse ? currentDtr : (bool?)null;
+                var restoreRts = missedRtsPulse ? currentRts : (bool?)null;
+                frames.Add(Rfc2217Client.BuildSetModemControl(pulseDtr, pulseRts));
+                frames.Add(Rfc2217Client.BuildSetModemControl(restoreDtr, restoreRts));
+                descriptions.Add($"modem raw=0x{current.ModemStatus:X8}, event=0x{eventMask:X8}, synthesized pulse dtr={FormatNullableBool(pulseDtr)}, rts={FormatNullableBool(pulseRts)}");
+            }
+        }
 
+        return BuildFrame(frames, descriptions);
+    }
+
+    private static Rfc2217OutboundFrame CombineFrames(params Rfc2217OutboundFrame[] frames)
+    {
+        var nonEmpty = frames.Where(frame => frame.Bytes.Length > 0).ToArray();
+        if (nonEmpty.Length == 0)
+        {
+            return new Rfc2217OutboundFrame([], [], "serial state unchanged");
+        }
+
+        return new Rfc2217OutboundFrame(
+            nonEmpty.SelectMany(frame => frame.Bytes).ToArray(),
+            [],
+            $"RFC2217 serial state {string.Join("; ", nonEmpty.Select(frame => frame.Description))} sent without ACK wait.");
+    }
+
+    private static Rfc2217OutboundFrame BuildFrame(List<byte[]> frames, List<string> descriptions)
+    {
         return frames.Count == 0
             ? new Rfc2217OutboundFrame([], [], "serial state unchanged")
             : new Rfc2217OutboundFrame(
                 frames.SelectMany(frame => frame).ToArray(),
                 [],
-                $"RFC2217 serial state {string.Join("; ", descriptions)} sent without ACK wait.");
+                string.Join("; ", descriptions));
     }
+
+    private static string FormatNullableBool(bool? value) => value?.ToString() ?? "-";
 
     public static bool MapCom0comPeerDtr(uint modemStatus) => (modemStatus & SerialPortSnapshot.Dsr) != 0;
 
     public static bool MapCom0comPeerRts(uint modemStatus) => (modemStatus & SerialPortSnapshot.Cts) != 0;
+
+    public static byte[] BuildCom0comPeerModemControlFrames(uint previousModemStatus, uint currentModemStatus, uint eventMask)
+    {
+        var previous = new SerialPortSnapshot(previousModemStatus, 0, 0, 0, 0);
+        var current = previous with { ModemStatus = currentModemStatus };
+        return BuildModemChangeFrame(previous, current, eventMask).Bytes;
+    }
 
     private async Task NetworkLoopAsync()
     {
@@ -289,7 +451,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                     try
                     {
                         await _serial!.WriteAsync(frame.SerialData, _stop.Token).ConfigureAwait(false);
-                        _log.Info(_mapping.Name, $"RFC2217 RX serial {frame.SerialData.Length} byte(s) to {_mapping.BackingPort}.");
+                        LogSerialRx(frame.SerialData.Length);
                     }
                     catch (SerialPortWriteTimeoutException ex)
                     {
@@ -428,8 +590,13 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         throw new IOException($"RFC2217 {frame.Description} ack timed out after retry.");
     }
 
-    private async Task WriteNetworkAsync(NetworkStream stream, byte[] bytes)
+    private async Task WriteNetworkAsync(NetworkStream stream, ReadOnlyMemory<byte> bytes)
     {
+        if (bytes.Length == 0)
+        {
+            return;
+        }
+
         await _networkWriteLock.WaitAsync(_stop.Token).ConfigureAwait(false);
         try
         {
@@ -440,6 +607,18 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         {
             _networkWriteLock.Release();
         }
+    }
+
+    private void LogSerialTx(int bytes)
+    {
+        _serialTxLog.Record(bytes, (totalBytes, chunks) =>
+            _log.Info(_mapping.Name, $"Serial TX {totalBytes} byte(s) in {chunks} chunk(s) from {_mapping.BackingPort}."));
+    }
+
+    private void LogSerialRx(int bytes)
+    {
+        _serialRxLog.Record(bytes, (totalBytes, chunks) =>
+            _log.Info(_mapping.Name, $"RFC2217 RX serial {totalBytes} byte(s) in {chunks} chunk(s) to {_mapping.BackingPort}."));
     }
 
     private Task PrepareAckWait(IReadOnlyList<Rfc2217ExpectedAck> expectedAcks)
@@ -608,13 +787,47 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         Rfc2217ExpectedAck[] ExpectedAckCommands,
         string Description,
         bool ContinueOnAckTimeout = false);
+
+    private sealed class ThroughputLogThrottle
+    {
+        private readonly long _intervalTicks;
+        private long _nextFlushTicks;
+        private long _bytes;
+        private int _chunks;
+
+        public ThroughputLogThrottle(TimeSpan interval)
+        {
+            _intervalTicks = (long)(interval.TotalSeconds * Stopwatch.Frequency);
+        }
+
+        public void Record(int bytes, Action<long, int> flush)
+        {
+            _bytes += bytes;
+            _chunks++;
+
+            var now = Stopwatch.GetTimestamp();
+            if (_nextFlushTicks != 0 && now < _nextFlushTicks)
+            {
+                return;
+            }
+
+            flush(_bytes, _chunks);
+            _bytes = 0;
+            _chunks = 0;
+            _nextFlushTicks = now + _intervalTicks;
+        }
+    }
 }
 
 public interface ISerialPortEndpoint : IDisposable
 {
-    Task<int> ReadAsync(byte[] buffer, CancellationToken cancellationToken);
-    Task WriteAsync(byte[] bytes, CancellationToken cancellationToken);
+    bool SupportsModemStatusEvents { get; }
+    ValueTask<int> ReadAsync(byte[] buffer, CancellationToken cancellationToken);
+    ValueTask WriteAsync(byte[] bytes, CancellationToken cancellationToken);
     SerialPortSnapshot GetSnapshot();
+    SerialPortSettings GetSettings();
+    uint GetModemStatus();
+    uint WaitForModemStatusChange(CancellationToken cancellationToken);
 }
 
 public readonly record struct SerialPortSnapshot(
@@ -628,7 +841,16 @@ public readonly record struct SerialPortSnapshot(
     public const uint Dsr = 0x00000020;
     public const uint Ring = 0x00000040;
     public const uint Rlsd = 0x00000080;
+    public const uint EventNone = 0x00000000;
+    public const uint EventCts = 0x00000008;
+    public const uint EventDsr = 0x00000010;
 }
+
+public readonly record struct SerialPortSettings(
+    uint BaudRate,
+    byte ByteSize,
+    byte Parity,
+    byte StopBits);
 
 public interface ISerialPortEndpointFactory
 {
@@ -824,15 +1046,19 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
     private const uint FileShareWrite = 0x00000002;
     private const uint OpenExisting = 3;
     private const uint FileAttributeNormal = 0x00000080;
+    private const uint EventCts = 0x00000008;
+    private const uint EventDsr = 0x00000010;
     private const uint SerialReadPollTimeoutMs = 10;
     private static readonly TimeSpan ZeroWriteRetryInterval = TimeSpan.FromMilliseconds(10);
     private static readonly TimeSpan ZeroWriteTimeout = TimeSpan.FromMilliseconds(500);
 
     private readonly SafeFileHandle _handle;
+    private readonly SafeFileHandle? _eventHandle;
 
-    private Win32SerialPortEndpoint(SafeFileHandle handle)
+    private Win32SerialPortEndpoint(SafeFileHandle handle, SafeFileHandle? eventHandle)
     {
         _handle = handle;
+        _eventHandle = eventHandle;
     }
 
     public static Win32SerialPortEndpoint Open(string portName)
@@ -876,36 +1102,41 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
             throw new SerialPortOpenException(portName, path, error, "configure serial port timeouts for");
         }
 
-        return new Win32SerialPortEndpoint(handle);
+        var eventHandle = TryOpenEventHandle(path);
+        return new Win32SerialPortEndpoint(handle, eventHandle);
     }
 
-    public Task<int> ReadAsync(byte[] buffer, CancellationToken cancellationToken)
-    {
-        return Task.Run(() =>
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!ReadFile(_handle, buffer, buffer.Length, out var bytesRead, IntPtr.Zero))
-            {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            }
+    public bool SupportsModemStatusEvents => _eventHandle is { IsClosed: false, IsInvalid: false };
 
-            return bytesRead;
-        }, cancellationToken);
+    public ValueTask<int> ReadAsync(byte[] buffer, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!ReadFile(_handle, buffer, buffer.Length, out var bytesRead, IntPtr.Zero))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        return ValueTask.FromResult(bytesRead);
     }
 
-    public Task WriteAsync(byte[] bytes, CancellationToken cancellationToken)
+    public ValueTask WriteAsync(byte[] bytes, CancellationToken cancellationToken)
     {
-        return Task.Run(() =>
+        cancellationToken.ThrowIfCancellationRequested();
+        if (bytes.Length == 0)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.CompletedTask;
+        }
+
+        var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try
+        {
+            var basePointer = pinned.AddrOfPinnedObject();
             var offset = 0;
             long? zeroWriteDeadline = null;
             while (offset < bytes.Length)
             {
                 var remaining = bytes.Length - offset;
-                var chunk = new byte[remaining];
-                Buffer.BlockCopy(bytes, offset, chunk, 0, remaining);
-                if (!WriteFile(_handle, chunk, chunk.Length, out var written, IntPtr.Zero))
+                if (!WriteFile(_handle, IntPtr.Add(basePointer, offset), remaining, out var written, IntPtr.Zero))
                 {
                     throw new Win32Exception(Marshal.GetLastWin32Error());
                 }
@@ -925,7 +1156,13 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
                 offset += written;
                 zeroWriteDeadline = null;
             }
-        }, cancellationToken);
+        }
+        finally
+        {
+            pinned.Free();
+        }
+
+        return ValueTask.CompletedTask;
     }
 
     private static void SleepBeforeRetry(CancellationToken cancellationToken)
@@ -939,23 +1176,81 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
 
     public SerialPortSnapshot GetSnapshot()
     {
-        if (!GetCommModemStatus(_handle, out var modemStatus))
-        {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-        }
+        var modemStatus = GetModemStatus();
+        var settings = GetSettings();
+        return new SerialPortSnapshot(modemStatus, settings.BaudRate, settings.ByteSize, settings.Parity, settings.StopBits);
+    }
 
+    public SerialPortSettings GetSettings()
+    {
         var dcb = new Dcb { DCBlength = (uint)Marshal.SizeOf<Dcb>() };
         if (!GetCommState(_handle, ref dcb))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error());
         }
 
-        return new SerialPortSnapshot(modemStatus, dcb.BaudRate, dcb.ByteSize, dcb.Parity, dcb.StopBits);
+        return new SerialPortSettings(dcb.BaudRate, dcb.ByteSize, dcb.Parity, dcb.StopBits);
+    }
+
+    public uint GetModemStatus()
+    {
+        if (!GetCommModemStatus(_handle, out var modemStatus))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        return modemStatus;
+    }
+
+    public uint WaitForModemStatusChange(CancellationToken cancellationToken)
+    {
+        if (!SupportsModemStatusEvents)
+        {
+            throw new NotSupportedException("Serial modem status events are unavailable.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!WaitCommEvent(_eventHandle!, out var eventMask, IntPtr.Zero))
+        {
+            var error = Marshal.GetLastWin32Error();
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new Win32Exception(error);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return eventMask;
     }
 
     public void Dispose()
     {
+        _eventHandle?.Dispose();
         _handle.Dispose();
+    }
+
+    private static SafeFileHandle? TryOpenEventHandle(string path)
+    {
+        var handle = CreateFileW(
+            path,
+            GenericRead | GenericWrite,
+            FileShareRead | FileShareWrite,
+            IntPtr.Zero,
+            OpenExisting,
+            FileAttributeNormal,
+            IntPtr.Zero);
+
+        if (handle.IsInvalid)
+        {
+            handle.Dispose();
+            return null;
+        }
+
+        if (!SetCommMask(handle, EventCts | EventDsr))
+        {
+            handle.Dispose();
+            return null;
+        }
+
+        return handle;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1008,6 +1303,15 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
     private static extern bool GetCommModemStatus(SafeFileHandle hFile, out uint lpModemStat);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetCommMask(SafeFileHandle hFile, uint dwEvtMask);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WaitCommEvent(
+        SafeFileHandle hFile,
+        out uint lpEvtMask,
+        IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool ReadFile(
         SafeFileHandle hFile,
         byte[] lpBuffer,
@@ -1015,10 +1319,10 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         out int lpNumberOfBytesRead,
         IntPtr lpOverlapped);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "WriteFile")]
     private static extern bool WriteFile(
         SafeFileHandle hFile,
-        byte[] lpBuffer,
+        IntPtr lpBuffer,
         int nNumberOfBytesToWrite,
         out int lpNumberOfBytesWritten,
         IntPtr lpOverlapped);

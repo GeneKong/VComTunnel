@@ -199,6 +199,7 @@
                         <DataGridTextColumn x:Name="BackingColumn" Header="Backing" Binding="{Binding BackingPort}" Width="Auto" MinWidth="110"/>
                         <DataGridTextColumn x:Name="HostColumn" Header="Host" Binding="{Binding Host}" Width="Auto" MinWidth="150"/>
                         <DataGridTextColumn x:Name="PortColumn" Header="Port" Binding="{Binding Port}" Width="Auto" MinWidth="72"/>
+                        <DataGridCheckBoxColumn x:Name="Hub4comControlsColumn" Header="Controls" Binding="{Binding Hub4comForwardControlLines, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="SizeToHeader" MinWidth="78"/>
                         <DataGridCheckBoxColumn x:Name="AutoColumn" Header="Auto" Binding="{Binding AutoStart, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="SizeToHeader" MinWidth="64"/>
                         <DataGridCheckBoxColumn x:Name="RestartColumn" Header="Restart" Binding="{Binding RestartOnFailure}" Width="SizeToHeader" MinWidth="72"/>
                         <DataGridTextColumn x:Name="ServiceColumn" Header="Service" Binding="{Binding ServiceLabel}" Width="Auto" MinWidth="180" IsReadOnly="True"/>
