@@ -8,6 +8,47 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($PSVersionTable.PSEdition -eq "Core" -and $IsWindows) {
+    $environment = [System.Environment]::GetEnvironmentVariables("Process")
+    $pathKeys = @($environment.Keys | Where-Object {
+            [string]::Equals([string]$_, "PATH", [System.StringComparison]::OrdinalIgnoreCase)
+        })
+
+    if ($pathKeys.Count -gt 1) {
+        $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+        if (Test-Path -LiteralPath $windowsPowerShell) {
+            & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Configuration $Configuration -Platform $Platform
+            exit $LASTEXITCODE
+        }
+    }
+}
+
+function Normalize-ProcessPathVariable {
+    $environment = [System.Environment]::GetEnvironmentVariables("Process")
+    $pathKeys = @($environment.Keys | Where-Object {
+            [string]::Equals([string]$_, "PATH", [System.StringComparison]::OrdinalIgnoreCase)
+        })
+
+    if ($pathKeys.Count -le 1) {
+        return
+    }
+
+    $pathValue = $pathKeys |
+        ForEach-Object { [string]$environment[$_] } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -First 1
+
+    foreach ($pathKey in $pathKeys) {
+        [System.Environment]::SetEnvironmentVariable([string]$pathKey, $null, "Process")
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($pathValue)) {
+        [System.Environment]::SetEnvironmentVariable("Path", $pathValue, "Process")
+    }
+}
+
+Normalize-ProcessPathVariable
+
 $projectPath = Join-Path $PSScriptRoot "VComTunnel.Serial.vcxproj"
 $msbuildCandidates = @(
     "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe",

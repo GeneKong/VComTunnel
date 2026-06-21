@@ -12,7 +12,7 @@ public sealed class KmdfDeviceManager
     public const string HardwareId = @"Root\VComTunnelSerial";
     public const string DeviceName = "VComTunnel Virtual Serial Port";
     public const string TestSignedDriverPolicyHint =
-        "VComTunnel.Serial is experimental and is not a production-signed driver package. Windows may require Test Mode and a reboot; Secure Boot or driver signing policy can block installation.";
+        "VComTunnel.Serial is a test-signed KMDF driver package intended for authorized evaluation. The KMDF add/update flow may add the bundled test certificate to the local machine certificate stores. Windows may require Test Mode and a reboot; Secure Boot or driver signing policy can block installation.";
 
     private static readonly Guid PortsClassGuid = new("4D36E978-E325-11CE-BFC1-08002BE10318");
     private static readonly Regex PortRegex = new(@"\((COM\d+)\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -78,6 +78,7 @@ public sealed class KmdfDeviceManager
 
         try
         {
+            TrustDriverTestCertificateIfPresent(infPath);
             var instanceId = SetupApiCreateRootDevice(portName);
             var rebootRequired = InstallDriverForDeviceWithPolicyHint(infPath);
             RestartDevice(instanceId);
@@ -160,6 +161,7 @@ public sealed class KmdfDeviceManager
 
         try
         {
+            TrustDriverTestCertificateIfPresent(infPath);
             var rebootRequired = InstallDriverForDeviceWithPolicyHint(infPath);
             RestartDevice(device.InstanceId);
             var updated = GetDevices().FirstOrDefault(candidate => string.Equals(candidate.InstanceId, device.InstanceId, StringComparison.OrdinalIgnoreCase))
@@ -254,6 +256,25 @@ public sealed class KmdfDeviceManager
         return null;
     }
 
+    public static string? ResolveDriverCertificatePath(string infPath)
+    {
+        var full = Path.GetFullPath(infPath);
+        var root = Path.GetDirectoryName(full);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return null;
+        }
+
+        var parent = Directory.GetParent(root);
+        var candidates = new[]
+        {
+            Path.Combine(root, "VComTunnel.Serial.cer"),
+            parent is null ? "" : Path.Combine(parent.FullName, "VComTunnel.Serial.cer")
+        };
+
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
     private static bool InstallDriverForDevice(string infPath)
     {
         if (!UpdateDriverForPlugAndPlayDevices(
@@ -267,6 +288,28 @@ public sealed class KmdfDeviceManager
         }
 
         return rebootRequired;
+    }
+
+    private static void TrustDriverTestCertificateIfPresent(string infPath)
+    {
+        var certificatePath = ResolveDriverCertificatePath(infPath);
+        if (certificatePath is null)
+        {
+            return;
+        }
+
+        AddCertificateToStore(certificatePath, "Root");
+        AddCertificateToStore(certificatePath, "TrustedPublisher");
+    }
+
+    private static void AddCertificateToStore(string certificatePath, string storeName)
+    {
+        var result = RunProcess("certutil.exe", ["-addstore", "-f", storeName, certificatePath]);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"Install VComTunnel.Serial test certificate into LocalMachine\\{storeName} failed: {result.Error}{result.Output}");
+        }
     }
 
     private static bool InstallDriverForDeviceWithPolicyHint(string infPath)

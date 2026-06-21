@@ -326,6 +326,28 @@ if (-not $SkipBundledDependencies) {
     }
 }
 
+$kmdfDriverPackage = Join-Path $repoRoot "drivers\VComTunnel.Serial\x64\Release\VComTunnel.Serial"
+$kmdfDriverCertificate = Join-Path $repoRoot "drivers\VComTunnel.Serial\x64\Release\VComTunnel.Serial.cer"
+$kmdfDriverInf = Join-Path $kmdfDriverPackage "VComTunnel.Serial.inf"
+$kmdfDriverSys = Join-Path $kmdfDriverPackage "VComTunnel.Serial.sys"
+$kmdfDriverCat = if (Test-Path -LiteralPath $kmdfDriverPackage) {
+    Get-ChildItem -LiteralPath $kmdfDriverPackage -Filter "*.cat" -File | Select-Object -First 1
+} else {
+    $null
+}
+
+if ((Test-Path -LiteralPath $kmdfDriverInf) -and (Test-Path -LiteralPath $kmdfDriverSys) -and $kmdfDriverCat) {
+    $targetKmdfDriverPackage = Join-Path $packageRoot "drivers\VComTunnel.Serial\x64\Release\VComTunnel.Serial"
+    New-Item -ItemType Directory -Force -Path $targetKmdfDriverPackage | Out-Null
+    Get-ChildItem -LiteralPath $kmdfDriverPackage -Force |
+        Copy-Item -Destination $targetKmdfDriverPackage -Recurse -Force
+    if (Test-Path -LiteralPath $kmdfDriverCertificate) {
+        Copy-Item -LiteralPath $kmdfDriverCertificate -Destination $targetKmdfDriverPackage -Force
+    }
+} else {
+    Write-Warning "KMDF driver package was not found under drivers\VComTunnel.Serial\x64\Release\VComTunnel.Serial. Build the KMDF driver before packaging if KMDF add/update should work from this package."
+}
+
 $noticeLines = @(
     "VComTunnel third-party dependency archives",
     "",
@@ -370,7 +392,8 @@ $firstReadme = @(
     "",
     "Safety notes:",
     "- The stable release path is com0comHub4com.",
-    "- The KMDF backend is experimental and should not be treated as a production signed-driver release.",
+    "- The KMDF backend in this package is test-signed and intended for authorized evaluation or internal validation.",
+    "- Creating or updating a KMDF port may add the bundled VComTunnel.Serial test certificate to the local machine certificate stores, install or update the driver, and require a reboot.",
     "- Keep the local API on 127.0.0.1 and test DTR/RTS/BREAK behavior on safe hardware first."
 )
 Set-Content -LiteralPath (Join-Path $packageRoot "README-FIRST.txt") -Value $firstReadme -Encoding UTF8
@@ -395,7 +418,8 @@ $firstReadmeZh = @(
     "",
     "安全边界：",
     "- 稳定发布路径是 com0comHub4com。",
-    "- KMDF 后端仍是实验路径，不能当作正式签名驱动发布。",
+    "- 本包内 KMDF 后端为测试签名版本，仅用于授权测试或内部验证。",
+    "- 创建或更新 KMDF 端口时，程序可能会将随包 VComTunnel.Serial 测试证书写入本机证书存储区，安装或更新驱动，并要求重启。",
     "- 本机 API 只应使用 127.0.0.1，DTR/RTS/BREAK 等控制线行为先在安全硬件上验证。"
 )
 Set-Content -LiteralPath (Join-Path $packageRoot "README-FIRST.zh-CN.txt") -Value $firstReadmeZh -Encoding UTF8

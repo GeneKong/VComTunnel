@@ -14,6 +14,8 @@ public sealed class TunnelOrchestrator
     private readonly Func<TunnelMapping, InMemoryLog, Action<IKmdfTunnelSession, string>, IKmdfTunnelSession> _kmdfSessionFactory;
     private readonly Func<TunnelMapping, InMemoryLog, Action<IManagedTunnelSession, string>, IManagedTunnelSession> _com0comServiceSessionFactory;
     private readonly TimeSpan _restartDelay;
+    private readonly TimeSpan _portReleaseRetryTimeout;
+    private readonly TimeSpan _portReleaseRetryDelay;
     private readonly ConcurrentDictionary<string, ManagedTunnel> _tunnels = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _lastProcessErrors = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _restartVersions = new(StringComparer.OrdinalIgnoreCase);
@@ -30,7 +32,9 @@ public sealed class TunnelOrchestrator
         Func<TunnelMapping, InMemoryLog, Action<IKmdfTunnelSession, string>, IKmdfTunnelSession>? kmdfSessionFactory = null,
         Func<TunnelMapping, InMemoryLog, Action<IManagedTunnelSession, string>, IManagedTunnelSession>? com0comServiceSessionFactory = null,
         Func<TunnelMapping, Hub4comCommand>? hub4comCommandFactory = null,
-        TimeSpan? restartDelay = null)
+        TimeSpan? restartDelay = null,
+        TimeSpan? portReleaseRetryTimeout = null,
+        TimeSpan? portReleaseRetryDelay = null)
     {
         _configStore = configStore;
         _dependencyDetector = dependencyDetector;
@@ -41,6 +45,8 @@ public sealed class TunnelOrchestrator
         _kmdfSessionFactory = kmdfSessionFactory ?? ((mapping, sessionLog, faulted) => new KmdfTunnelSession(mapping, sessionLog, faulted));
         _com0comServiceSessionFactory = com0comServiceSessionFactory ?? ((mapping, sessionLog, faulted) => new Com0comServiceTunnelSession(mapping, sessionLog, faulted));
         _restartDelay = restartDelay ?? TimeSpan.FromSeconds(2);
+        _portReleaseRetryTimeout = portReleaseRetryTimeout ?? TimeSpan.FromSeconds(3);
+        _portReleaseRetryDelay = portReleaseRetryDelay ?? TimeSpan.FromMilliseconds(150);
     }
 
     public async Task<VComTunnelConfig> GetConfigAsync(CancellationToken cancellationToken = default)
@@ -220,8 +226,10 @@ public sealed class TunnelOrchestrator
         StopExisting(mapping.Id);
 
         var effectiveMapping = mapping with { SuppressInitialControlLineSync = true };
-        var session = _kmdfSessionFactory(effectiveMapping, _log, (faultedSession, error) => OnKmdfFaulted(mapping, faultedSession, error));
-        return await StartManagedSessionAsync(mapping, session, cancellationToken);
+        return await StartManagedSessionAsync(
+            mapping,
+            () => _kmdfSessionFactory(effectiveMapping, _log, (faultedSession, error) => OnKmdfFaulted(mapping, faultedSession, error)),
+            cancellationToken);
     }
 
     private async Task<TunnelStatus> StartCom0comServiceAsync(
@@ -239,32 +247,51 @@ public sealed class TunnelOrchestrator
         StopEndpointConflicts(mapping);
         StopExisting(mapping.Id);
 
-        var session = _com0comServiceSessionFactory(mapping, _log, (faultedSession, error) => OnSessionFaulted(mapping, faultedSession, error));
-        return await StartManagedSessionAsync(mapping, session, cancellationToken);
+        return await StartManagedSessionAsync(
+            mapping,
+            () => _com0comServiceSessionFactory(mapping, _log, (faultedSession, error) => OnSessionFaulted(mapping, faultedSession, error)),
+            cancellationToken,
+            retryBackingPortRelease: true);
     }
 
     private async Task<TunnelStatus> StartManagedSessionAsync(
         TunnelMapping mapping,
-        IManagedTunnelSession session,
-        CancellationToken cancellationToken)
+        Func<IManagedTunnelSession> sessionFactory,
+        CancellationToken cancellationToken,
+        bool retryBackingPortRelease = false)
     {
-        _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Starting, null, session, DateTimeOffset.UtcNow, null);
+        var retryUntil = DateTimeOffset.UtcNow + _portReleaseRetryTimeout;
+        while (true)
+        {
+            var session = sessionFactory();
+            _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Starting, null, session, DateTimeOffset.UtcNow, null);
 
-        try
-        {
-            await session.StartAsync(cancellationToken);
-            var running = new ManagedTunnel(mapping, TunnelRunState.Running, null, session, DateTimeOffset.UtcNow, null);
-            _tunnels[mapping.Id] = running;
-            return running.ToStatus();
-        }
-        catch (Exception ex)
-        {
-            session.Dispose();
-            var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, ex.Message);
-            _tunnels[mapping.Id] = faulted;
-            _log.Error(mapping.Name, ex.Message);
-            ScheduleSessionRestart(mapping, ex.Message);
-            return faulted.ToStatus();
+            try
+            {
+                await session.StartAsync(cancellationToken);
+                var running = new ManagedTunnel(mapping, TunnelRunState.Running, null, session, DateTimeOffset.UtcNow, null);
+                _tunnels[mapping.Id] = running;
+                return running.ToStatus();
+            }
+            catch (Exception ex) when (retryBackingPortRelease
+                && IsBackingPortAccessDeniedError(ex.Message)
+                && DateTimeOffset.UtcNow < retryUntil)
+            {
+                session.Dispose();
+                _log.Info(
+                    mapping.Name,
+                    $"Backing port {mapping.BackingPort} is still busy after stopping the previous backend; retrying in {_portReleaseRetryDelay.TotalMilliseconds:0} ms.");
+                await Task.Delay(_portReleaseRetryDelay, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                session.Dispose();
+                var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, ex.Message);
+                _tunnels[mapping.Id] = faulted;
+                _log.Error(mapping.Name, ex.Message);
+                ScheduleSessionRestart(mapping, ex.Message);
+                return faulted.ToStatus();
+            }
         }
     }
 
@@ -442,7 +469,9 @@ public sealed class TunnelOrchestrator
     {
         return value.Contains("CreateFile", StringComparison.OrdinalIgnoreCase)
             || value.Contains("ERROR 2", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("Access is denied", StringComparison.OrdinalIgnoreCase);
+            || value.Contains("ERROR 5", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Access is denied", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("拒绝访问", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsPermanentProcessError(string value)
@@ -458,9 +487,18 @@ public sealed class TunnelOrchestrator
 
     private static bool IsBackingPortAccessDeniedError(string value)
     {
+        var accessDenied = value.Contains("ERROR 5", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Access is denied", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("拒绝访问", StringComparison.OrdinalIgnoreCase);
+        if (!accessDenied)
+        {
+            return false;
+        }
+
         return value.Contains("CreateFile", StringComparison.OrdinalIgnoreCase)
-            && (value.Contains("ERROR 5", StringComparison.OrdinalIgnoreCase)
-                || value.Contains("Access is denied", StringComparison.OrdinalIgnoreCase));
+            || value.Contains("serial port", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("backing port", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("CNC", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsPermanentSessionError(string value)
@@ -469,7 +507,8 @@ public sealed class TunnelOrchestrator
             || value.Contains("driver protocol", StringComparison.OrdinalIgnoreCase)
             || value.Contains("ack returned unexpected value", StringComparison.OrdinalIgnoreCase)
             || value.Contains("only available on Windows", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("backingPort is required", StringComparison.OrdinalIgnoreCase);
+            || value.Contains("backingPort is required", StringComparison.OrdinalIgnoreCase)
+            || IsBackingPortAccessDeniedError(value);
     }
 
     private static string FormatBackendForLog(TunnelBackend backend)

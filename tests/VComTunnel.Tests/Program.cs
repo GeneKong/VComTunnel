@@ -20,6 +20,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("esptool baud monitor waits for response", () => Task.Run(EspToolBaudMonitorWaitsForResponse)),
     ("KMDF control path uses visible COM", () => Task.Run(KmdfControlPathUsesVisibleCom)),
     ("KMDF pnputil CSV parser finds VComTunnel ports", () => Task.Run(KmdfPnpUtilCsvParserFindsPorts)),
+    ("KMDF driver certificate path resolves", () => Task.Run(KmdfDriverCertificatePathResolves)),
     ("RFC2217 command encoding", () => Task.Run(Rfc2217CommandEncoding)),
     ("hub4com RFC2217 client baseline", () => Task.Run(Hub4comRfc2217ClientBaseline)),
     ("RFC2217 telnet parser", () => Task.Run(Rfc2217TelnetParser)),
@@ -35,6 +36,8 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com service backend restarts after network fault", Com0comServiceBackendRestartsAfterNetworkFaultAsync),
     ("com0com service start requests are serialized", Com0comServiceStartRequestsAreSerializedAsync),
     ("starting same endpoint stops prior tunnel", StartingSameEndpointStopsPriorTunnelAsync),
+    ("hub4com to com0com service retries busy backing port", Hub4comToCom0comServiceRetriesBusyBackingPortAsync),
+    ("com0com service access denied does not restart", Com0comServiceAccessDeniedDoesNotRestartAsync),
     ("stale stopped session fault is ignored", StaleStoppedSessionFaultIsIgnoredAsync),
     ("com0com service backing open diagnostics", () => Task.Run(Com0comServiceBackingOpenDiagnostics)),
     ("com0com create and remove plans", Com0comCreateAndRemovePlansAsync),
@@ -299,6 +302,28 @@ InstanceId,DeviceDescription,ClassName,ClassGuid,ManufacturerName,Status,Problem
     AssertTrue(devices[0].IsStarted, "COM27 should be marked as started.");
     AssertEqual("COM31", devices[1].PortName);
     AssertEqual("22", devices[1].ProblemCode ?? "");
+}
+
+static void KmdfDriverCertificatePathResolves()
+{
+    using var temp = new TempDir();
+    var package = Path.Combine(temp.Path, "drivers", "VComTunnel.Serial", "x64", "Release", "VComTunnel.Serial");
+    Directory.CreateDirectory(package);
+    var inf = Path.Combine(package, "VComTunnel.Serial.inf");
+    var sys = Path.Combine(package, "VComTunnel.Serial.sys");
+    var cat = Path.Combine(package, "vcomtunnel.serial.cat");
+    File.WriteAllText(inf, "");
+    File.WriteAllText(sys, "");
+    File.WriteAllText(cat, "");
+
+    var packageCertificate = Path.Combine(package, "VComTunnel.Serial.cer");
+    File.WriteAllText(packageCertificate, "package certificate");
+    AssertEqual(packageCertificate, KmdfDeviceManager.ResolveDriverCertificatePath(inf) ?? "");
+
+    File.Delete(packageCertificate);
+    var releaseCertificate = Path.Combine(Directory.GetParent(package)!.FullName, "VComTunnel.Serial.cer");
+    File.WriteAllText(releaseCertificate, "release certificate");
+    AssertEqual(releaseCertificate, KmdfDeviceManager.ResolveDriverCertificatePath(inf) ?? "");
 }
 
 static void Rfc2217CommandEncoding()
@@ -993,6 +1018,118 @@ static async Task StartingSameEndpointStopsPriorTunnelAsync()
         "Starting a mapping should explain why a prior same-endpoint tunnel was stopped.");
 }
 
+static async Task Hub4comToCom0comServiceRetriesBusyBackingPortAsync()
+{
+    using var temp = new TempDir();
+    CreateFakeDependencies(temp.Path);
+    var hub = new TunnelMapping
+    {
+        Id = "hub",
+        Name = "COM61 hub",
+        Backend = TunnelBackend.Com0comHub4com,
+        VisiblePort = "COM61",
+        BackingPort = "CNCB61",
+        Host = "127.0.0.1",
+        Port = 5000,
+        RestartOnFailure = false
+    };
+    var managed = new TunnelMapping
+    {
+        Id = "managed",
+        Name = "COM61 managed",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM61",
+        BackingPort = "CNCB61",
+        Host = "127.0.0.1",
+        Port = 5000,
+        RestartOnFailure = true
+    };
+    var store = new ConfigStore(Path.Combine(temp.Path, "config.json"));
+    await store.SaveAsync(new VComTunnelConfig { Mappings = [hub, managed] });
+    var log = new InMemoryLog();
+    var starts = 0;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM61", "CNCB61"],
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            var start = Interlocked.Increment(ref starts);
+            return new FakeManagedTunnelSession(
+                faulted,
+                failAfterStart: null,
+                failOnStart: start == 1 ? BusyBackingPortMessage("CNCB61") : null);
+        },
+        hub4comCommandFactory: mapping => BuildFakeHub4comCommand(temp.Path, mapping),
+        restartDelay: TimeSpan.FromMilliseconds(50),
+        portReleaseRetryTimeout: TimeSpan.FromMilliseconds(300),
+        portReleaseRetryDelay: TimeSpan.FromMilliseconds(10));
+
+    var first = await orchestrator.StartAsync("hub");
+    AssertEqual(TunnelRunState.Running.ToString(), first.State.ToString());
+
+    var second = await orchestrator.StartAsync("managed");
+    AssertEqual(TunnelRunState.Running.ToString(), second.State.ToString());
+    AssertEqual("2", Volatile.Read(ref starts).ToString());
+
+    var statuses = orchestrator.GetStatus().Tunnels.ToDictionary(t => t.Id);
+    AssertEqual(TunnelRunState.Stopped.ToString(), statuses["hub"].State.ToString());
+    AssertEqual(TunnelRunState.Running.ToString(), statuses["managed"].State.ToString());
+    AssertTrue(
+        log.Snapshot().Any(e => e.Message.Contains("still busy after stopping the previous backend", StringComparison.OrdinalIgnoreCase)),
+        "Backend switch should retry while the old process releases the backing port.");
+    AssertTrue(
+        !log.Snapshot().Any(e => e.Message.Contains("Scheduling com0comService restart", StringComparison.OrdinalIgnoreCase)),
+        "Transient switch-time port release should not be surfaced as a restart fault.");
+
+    orchestrator.Stop("managed");
+}
+
+static async Task Com0comServiceAccessDeniedDoesNotRestartAsync()
+{
+    using var temp = new TempDir();
+    var mapping = new TunnelMapping
+    {
+        Id = "managed",
+        Name = "Busy managed",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM62",
+        BackingPort = "CNCB62",
+        Host = "127.0.0.1",
+        Port = 5000,
+        RestartOnFailure = true
+    };
+    var store = await StoreWithMappingAsync(temp.Path, mapping);
+    var log = new InMemoryLog();
+    var starts = 0;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM62", "CNCB62"],
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            Interlocked.Increment(ref starts);
+            return new FakeManagedTunnelSession(faulted, failAfterStart: null, failOnStart: BusyBackingPortMessage("CNCB62"));
+        },
+        restartDelay: TimeSpan.FromMilliseconds(50),
+        portReleaseRetryTimeout: TimeSpan.FromMilliseconds(40),
+        portReleaseRetryDelay: TimeSpan.FromMilliseconds(10));
+
+    var status = await orchestrator.StartAsync("managed");
+    AssertEqual(TunnelRunState.Faulted.ToString(), status.State.ToString());
+    AssertStringContains(status.LastError ?? "", "ERROR 5");
+    await Task.Delay(160);
+
+    AssertTrue(Volatile.Read(ref starts) >= 2, "The startup path should retry briefly before surfacing ERROR 5.");
+    var current = orchestrator.GetStatus().Tunnels.Single(t => t.Id == "managed");
+    AssertEqual(TunnelRunState.Faulted.ToString(), current.State.ToString());
+    AssertTrue(
+        !log.Snapshot().Any(e => e.Message.Contains("Scheduling com0comService restart", StringComparison.OrdinalIgnoreCase)),
+        "A persistent backing-port access-denied error should not auto-restart and spam the log.");
+}
+
 static async Task StaleStoppedSessionFaultIsIgnoredAsync()
 {
     using var temp = new TempDir();
@@ -1575,7 +1712,9 @@ static TunnelOrchestrator CreateOrchestratorWithPorts(
     Func<TunnelMapping, InMemoryLog, Action<IKmdfTunnelSession, string>, IKmdfTunnelSession>? kmdfSessionFactory = null,
     Func<TunnelMapping, InMemoryLog, Action<IManagedTunnelSession, string>, IManagedTunnelSession>? com0comServiceSessionFactory = null,
     Func<TunnelMapping, Hub4comCommand>? hub4comCommandFactory = null,
-    TimeSpan? restartDelay = null)
+    TimeSpan? restartDelay = null,
+    TimeSpan? portReleaseRetryTimeout = null,
+    TimeSpan? portReleaseRetryDelay = null)
 {
     return new TunnelOrchestrator(
         store,
@@ -1586,7 +1725,9 @@ static TunnelOrchestrator CreateOrchestratorWithPorts(
         kmdfSessionFactory,
         com0comServiceSessionFactory,
         hub4comCommandFactory,
-        restartDelay);
+        restartDelay,
+        portReleaseRetryTimeout,
+        portReleaseRetryDelay);
 }
 
 static Hub4comCommand BuildFakeHub4comCommand(string root, TunnelMapping mapping)
@@ -1625,6 +1766,9 @@ static async Task WaitUntilAsync(Func<bool> condition, string message, int timeo
 
     throw new Exception(message);
 }
+
+static string BusyBackingPortMessage(string portName) =>
+    $@"Could not open serial port \\.\{portName}: ERROR 5 - Access is denied. ERROR 5 usually means the backing port is already open by another mapping, hub4com/com2tcp, or a serial tool; stop that process and retry.";
 
 static void AssertEmpty(IReadOnlyList<string> errors)
 {
@@ -1863,11 +2007,13 @@ internal sealed class FakeManagedTunnelSession : IManagedTunnelSession
 {
     private readonly Action<IManagedTunnelSession, string> _faulted;
     private readonly string? _failAfterStart;
+    private readonly string? _failOnStart;
 
-    public FakeManagedTunnelSession(Action<IManagedTunnelSession, string> faulted, string? failAfterStart)
+    public FakeManagedTunnelSession(Action<IManagedTunnelSession, string> faulted, string? failAfterStart, string? failOnStart = null)
     {
         _faulted = faulted;
         _failAfterStart = failAfterStart;
+        _failOnStart = failOnStart;
     }
 
     public TunnelRunState State { get; private set; } = TunnelRunState.Starting;
@@ -1875,6 +2021,13 @@ internal sealed class FakeManagedTunnelSession : IManagedTunnelSession
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        if (_failOnStart is not null)
+        {
+            LastError = _failOnStart;
+            State = TunnelRunState.Faulted;
+            throw new IOException(_failOnStart);
+        }
+
         State = TunnelRunState.Running;
         if (_failAfterStart is not null)
         {

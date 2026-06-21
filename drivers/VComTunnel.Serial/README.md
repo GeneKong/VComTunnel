@@ -2,8 +2,9 @@
 
 This directory contains the phase 2 driver design and KMDF driver prototype.
 The driver and service channel are implemented enough for experimental
-single-port RFC2217 bridging, but the package remains test-signed prototype
-work until broader serial-tool and ESP-DAP validation is complete.
+single-port RFC2217 bridging, but the package remains test-signed work intended
+for authorized evaluation until broader serial-tool and ESP-DAP validation is
+complete.
 
 The intended phase 2 result is a single visible COM device backed by
 `VComTunnel.Service`, replacing the phase 1 `com0com + hub4com` chain for one
@@ -37,8 +38,8 @@ Implementation entry point:
 3. Review the private service channel described in `SERVICE_CHANNEL.md`.
 4. Review the service-side backend described in `SERVICE_BACKEND.md`.
 5. Run the user-mode tests and driver build before installing a new package.
-6. Only then install the test-signed package on a disposable or
-   backed-up Windows 10/11 x64 machine.
+6. Only then install the test-signed package on an authorized evaluation or
+   internal validation Windows 10/11 x64 machine with a rollback plan.
 
 Build notes:
 

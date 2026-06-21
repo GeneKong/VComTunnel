@@ -425,10 +425,12 @@ Remaining hardening work is broader serial compatibility coverage and live ESP-D
 compatibility validation against real tools.
 
 The GUI does not install the KMDF driver during the normal dependency setup
-path. It only prompts for the experimental/test-signed driver when a user
+path. It only prompts for the test-signed driver when a user
 selects a `kmdf` mapping and explicitly creates or updates that KMDF port.
-Windows may require Test Mode and a reboot, and Secure Boot or driver signing
-policy can block installation.
+That elevated KMDF add/update flow may add the bundled
+`VComTunnel.Serial.cer` test certificate to the local machine certificate
+stores, install or update the driver, and require a reboot. Windows may require
+Test Mode, and Secure Boot or driver signing policy can block installation.
 
 ## Safety and Security
 
@@ -436,8 +438,8 @@ policy can block installation.
 - Treat RFC2217 endpoints as trusted lab infrastructure. RFC2217 itself does
   not provide encryption or authentication.
 - Do not expose VComTunnel service ports directly to untrusted networks.
-- The KMDF backend is test-signed prototype work. Install it only on a
-  disposable, backed-up, or otherwise recoverable Windows test machine.
+- The KMDF backend in this package is test-signed work intended for authorized
+  evaluation or internal validation.
 - Some DTR/RTS/BREAK/purge tests can reset or disturb attached boards. Use the
   safer RFC2217 probe modes first when working against real hardware.
 - Mapping start, `autoStart`, and automatic service recovery are data-link
