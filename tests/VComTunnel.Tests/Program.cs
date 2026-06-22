@@ -48,7 +48,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("missing backing port faults before hub4com", MissingBackingPortFaultsBeforeHub4comAsync),
     ("com0com service backend starts without hub4com", Com0comServiceBackendStartsWithoutHub4comAsync),
     ("com0com service backend restarts after network fault", Com0comServiceBackendRestartsAfterNetworkFaultAsync),
-    ("restart backoff doubles and caps automatic failures", RestartBackoffDoublesAndCapsAutomaticFailuresAsync),
+    ("restart backoff keeps retrying and limits repeated logs", RestartBackoffKeepsRetryingAndLimitsRepeatedLogsAsync),
     ("com0com service start requests are serialized", Com0comServiceStartRequestsAreSerializedAsync),
     ("starting same endpoint stops prior tunnel", StartingSameEndpointStopsPriorTunnelAsync),
     ("autostart restores last running same endpoint mapping", AutoStartRestoresLastRunningSameEndpointMappingAsync),
@@ -1337,7 +1337,7 @@ static async Task Com0comServiceBackendRestartsAfterNetworkFaultAsync()
         "com0com service network fault should schedule a restart.");
 }
 
-static async Task RestartBackoffDoublesAndCapsAutomaticFailuresAsync()
+static async Task RestartBackoffKeepsRetryingAndLimitsRepeatedLogsAsync()
 {
     using var temp = new TempDir();
     var mapping = new TunnelMapping
@@ -1374,20 +1374,22 @@ static async Task RestartBackoffDoublesAndCapsAutomaticFailuresAsync()
     AssertEqual(TunnelRunState.Faulted.ToString(), first.State.ToString());
 
     await WaitUntilAsync(
-        () => log.Snapshot().Count(e => e.Message.Contains("Scheduling Com0comService restart", StringComparison.OrdinalIgnoreCase)) >= 4,
-        "restart backoff did not schedule repeated retries.");
+        () => Volatile.Read(ref starts) >= 4,
+        "automatic restart attempts did not keep running under backoff.");
     orchestrator.Stop(id);
 
     var schedules = log.Snapshot()
         .Where(e => e.Message.Contains("Scheduling Com0comService restart", StringComparison.OrdinalIgnoreCase))
         .Select(e => e.Message)
-        .Take(4)
         .ToArray();
+    AssertEqual("2", schedules.Length.ToString());
     AssertStringContains(schedules[0], "attempt 1 in 10 ms");
     AssertStringContains(schedules[1], "attempt 2 in 20 ms");
-    AssertStringContains(schedules[2], "attempt 3 in 40 ms");
-    AssertStringContains(schedules[3], "attempt 4 in 40 ms");
-    AssertTrue(Volatile.Read(ref starts) >= 4, "automatic restart attempts should keep running under backoff.");
+    AssertTrue(
+        schedules.All(message =>
+            !message.Contains("attempt 3", StringComparison.OrdinalIgnoreCase) &&
+            !message.Contains("attempt 4", StringComparison.OrdinalIgnoreCase)),
+        "same-error restart scheduling logs should stop after the first two attempts.");
 
     var startupErrorCount = log.Snapshot().Count(e =>
         e.Level == "error" &&

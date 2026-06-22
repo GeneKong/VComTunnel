@@ -6,6 +6,8 @@ namespace VComTunnel.Core;
 
 public sealed class TunnelOrchestrator
 {
+    private const int RestartScheduleLogAttempts = 2;
+
     private readonly ConfigStore _configStore;
     private readonly DependencyDetector _dependencyDetector;
     private readonly Hub4comCommandBuilder _hub4comCommandBuilder;
@@ -900,9 +902,13 @@ public sealed class TunnelOrchestrator
     {
         var restartVersion = GetRestartVersion(mapping.Id);
         var backoff = AdvanceRestartBackoff(mapping.Id, error);
-        _log.Warn(
-            mapping.Name,
-            $"Scheduling {backendName} restart attempt {backoff.Attempt} in {FormatRestartDelay(backoff.Delay)} after: {error}");
+        if (backoff.Attempt <= RestartScheduleLogAttempts)
+        {
+            _log.Warn(
+                mapping.Name,
+                $"Scheduling {backendName} restart attempt {backoff.Attempt} in {FormatRestartDelay(backoff.Delay)} after: {error}");
+        }
+
         _ = Task.Run(async () =>
         {
             await Task.Delay(backoff.Delay);
