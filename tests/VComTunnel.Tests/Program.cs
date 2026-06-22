@@ -48,6 +48,9 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("restart backoff doubles and caps automatic failures", RestartBackoffDoublesAndCapsAutomaticFailuresAsync),
     ("com0com service start requests are serialized", Com0comServiceStartRequestsAreSerializedAsync),
     ("starting same endpoint stops prior tunnel", StartingSameEndpointStopsPriorTunnelAsync),
+    ("autostart restores last running same endpoint mapping", AutoStartRestoresLastRunningSameEndpointMappingAsync),
+    ("autostart timeout does not block another mapping", AutoStartTimeoutDoesNotBlockAnotherMappingAsync),
+    ("stale starting session completion is ignored", StaleStartingSessionCompletionIsIgnoredAsync),
     ("hub4com to com0com service retries busy backing port", Hub4comToCom0comServiceRetriesBusyBackingPortAsync),
     ("com0com service access denied does not restart", Com0comServiceAccessDeniedDoesNotRestartAsync),
     ("stale stopped session fault is ignored", StaleStoppedSessionFaultIsIgnoredAsync),
@@ -1375,6 +1378,215 @@ static async Task StartingSameEndpointStopsPriorTunnelAsync()
         log.Snapshot().Any(e => e.Message.Contains("same RFC2217 endpoint 127.0.0.1:5000", StringComparison.OrdinalIgnoreCase)),
         "Starting a mapping should explain why a prior same-endpoint tunnel was stopped.");
 }
+static async Task AutoStartRestoresLastRunningSameEndpointMappingAsync()
+{
+    using var temp = new TempDir();
+    var managed = new TunnelMapping
+    {
+        Id = "tun2",
+        Name = "Tunnel 2",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM12",
+        BackingPort = "CNCB12",
+        Host = "10.0.2.196",
+        Port = 5000,
+        AutoStart = true,
+        RestartOnFailure = true
+    };
+    var kmdf = new TunnelMapping
+    {
+        Id = "tun1",
+        Name = "Tunnel 1",
+        Backend = TunnelBackend.Kmdf,
+        VisiblePort = "COM13",
+        BackingPort = null,
+        Host = "10.0.2.196",
+        Port = 5000,
+        AutoStart = true,
+        RestartOnFailure = true
+    };
+    var store = new ConfigStore(Path.Combine(temp.Path, "config.json"));
+    await store.SaveAsync(new VComTunnelConfig { Mappings = [managed, kmdf] });
+
+    var firstLog = new InMemoryLog(Path.Combine(temp.Path, "first-logs"));
+    var firstOrchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        firstLog,
+        ["COM12", "CNCB12"],
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) => new FakeManagedTunnelSession(faulted, failAfterStart: null));
+    var first = await firstOrchestrator.StartAsync("tun2");
+    AssertEqual(TunnelRunState.Running.ToString(), first.State.ToString());
+    firstOrchestrator.Stop("tun2");
+
+    var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    var kmdfStarts = 0;
+    var managedStarts = 0;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM12", "CNCB12"],
+        kmdfSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            Interlocked.Increment(ref kmdfStarts);
+            return new FakeKmdfTunnelSession(faulted, failAfterStart: null);
+        },
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            Interlocked.Increment(ref managedStarts);
+            return new FakeManagedTunnelSession(faulted, failAfterStart: null);
+        });
+
+    await orchestrator.StartAutoStartMappingsAsync();
+
+    AssertEqual("0", Volatile.Read(ref kmdfStarts).ToString());
+    AssertEqual("1", Volatile.Read(ref managedStarts).ToString());
+    var statuses = orchestrator.GetStatus().Tunnels.ToDictionary(t => t.Id);
+    AssertEqual(TunnelRunState.Stopped.ToString(), statuses["tun1"].State.ToString());
+    AssertEqual(TunnelRunState.Running.ToString(), statuses["tun2"].State.ToString());
+    AssertTrue(
+        log.Snapshot().Any(e => e.Source == "Tunnel 1" && e.Message.Contains("last mapping that successfully reached Running", StringComparison.OrdinalIgnoreCase)),
+        "AutoStart should restore the mapping that last reached Running for the endpoint, not the last configured row.");
+}
+
+static async Task AutoStartTimeoutDoesNotBlockAnotherMappingAsync()
+{
+    using var temp = new TempDir();
+    var slow = new TunnelMapping
+    {
+        Id = "slow",
+        Name = "Slow tunnel",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM70",
+        BackingPort = "CNCB70",
+        Host = "127.0.0.1",
+        Port = 5000,
+        AutoStart = true,
+        RestartOnFailure = false
+    };
+    var fast = new TunnelMapping
+    {
+        Id = "fast",
+        Name = "Fast tunnel",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM71",
+        BackingPort = "CNCB71",
+        Host = "127.0.0.1",
+        Port = 5001,
+        AutoStart = true,
+        RestartOnFailure = false
+    };
+    var store = new ConfigStore(Path.Combine(temp.Path, "config.json"));
+    await store.SaveAsync(new VComTunnelConfig { Mappings = [slow, fast] });
+    var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    var slowEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var slowDisposed = 0;
+    var fastStarts = 0;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM70", "CNCB70", "COM71", "CNCB71"],
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            if (sessionMapping.Id == "slow")
+            {
+                return new DelayedManagedTunnelSession(
+                    async cancellationToken =>
+                    {
+                        slowEntered.SetResult();
+                        await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+                    },
+                    () => Interlocked.Increment(ref slowDisposed));
+            }
+
+            Interlocked.Increment(ref fastStarts);
+            return new FakeManagedTunnelSession(faulted, failAfterStart: null);
+        },
+        sessionStartTimeout: TimeSpan.FromMilliseconds(80));
+
+    var autoStart = orchestrator.StartAutoStartMappingsAsync();
+    await slowEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    await autoStart.WaitAsync(TimeSpan.FromSeconds(2));
+
+    AssertEqual("1", Volatile.Read(ref fastStarts).ToString());
+    AssertTrue(Volatile.Read(ref slowDisposed) > 0, "Timed-out startup session should be disposed.");
+    var statuses = orchestrator.GetStatus().Tunnels.ToDictionary(t => t.Id);
+    AssertEqual(TunnelRunState.Faulted.ToString(), statuses["slow"].State.ToString());
+    AssertStringContains(statuses["slow"].LastError ?? "", "startup timed out");
+    AssertEqual(TunnelRunState.Running.ToString(), statuses["fast"].State.ToString());
+}
+
+static async Task StaleStartingSessionCompletionIsIgnoredAsync()
+{
+    using var temp = new TempDir();
+    var oldMapping = new TunnelMapping
+    {
+        Id = "old",
+        Name = "Old tunnel",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM72",
+        BackingPort = "CNCB72",
+        Host = "127.0.0.1",
+        Port = 5000,
+        RestartOnFailure = false
+    };
+    var newMapping = new TunnelMapping
+    {
+        Id = "new",
+        Name = "New tunnel",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM73",
+        BackingPort = "CNCB73",
+        Host = "127.0.0.1",
+        Port = 5000,
+        RestartOnFailure = false
+    };
+    var store = new ConfigStore(Path.Combine(temp.Path, "config.json"));
+    await store.SaveAsync(new VComTunnelConfig { Mappings = [oldMapping, newMapping] });
+    var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    var oldStartEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseOldStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM72", "CNCB72", "COM73", "CNCB73"],
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            if (sessionMapping.Id == "old")
+            {
+                return new DelayedManagedTunnelSession(
+                    async cancellationToken =>
+                    {
+                        oldStartEntered.SetResult();
+                        await releaseOldStart.Task.WaitAsync(cancellationToken);
+                    },
+                    () => { });
+            }
+
+            return new FakeManagedTunnelSession(faulted, failAfterStart: null);
+        },
+        sessionStartTimeout: TimeSpan.FromSeconds(2));
+
+    var oldStart = orchestrator.StartAsync("old");
+    await oldStartEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+    var replacement = await orchestrator.StartAsync("new");
+    AssertEqual(TunnelRunState.Running.ToString(), replacement.State.ToString());
+
+    releaseOldStart.SetResult();
+    var staleResult = await oldStart.WaitAsync(TimeSpan.FromSeconds(2));
+    AssertEqual(TunnelRunState.Stopped.ToString(), staleResult.State.ToString());
+
+    var statuses = orchestrator.GetStatus().Tunnels.ToDictionary(t => t.Id);
+    AssertEqual(TunnelRunState.Stopped.ToString(), statuses["old"].State.ToString());
+    AssertEqual(TunnelRunState.Running.ToString(), statuses["new"].State.ToString());
+    AssertTrue(
+        log.Snapshot().Any(e => e.Source == "Old tunnel" && e.Message.Contains("Ignored stale", StringComparison.OrdinalIgnoreCase)),
+        "A late startup completion from a stopped tunnel should be ignored and logged.");
+}
 
 static async Task Hub4comToCom0comServiceRetriesBusyBackingPortAsync()
 {
@@ -2073,7 +2285,8 @@ static TunnelOrchestrator CreateOrchestratorWithPorts(
     TimeSpan? restartDelay = null,
     TimeSpan? portReleaseRetryTimeout = null,
     TimeSpan? portReleaseRetryDelay = null,
-    TimeSpan? restartMaxDelay = null)
+    TimeSpan? restartMaxDelay = null,
+    TimeSpan? sessionStartTimeout = null)
 {
     return new TunnelOrchestrator(
         store,
@@ -2087,7 +2300,8 @@ static TunnelOrchestrator CreateOrchestratorWithPorts(
         restartDelay,
         portReleaseRetryTimeout,
         portReleaseRetryDelay,
-        restartMaxDelay);
+        restartMaxDelay,
+        sessionStartTimeout);
 }
 
 static Hub4comCommand BuildFakeHub4comCommand(string root, TunnelMapping mapping)

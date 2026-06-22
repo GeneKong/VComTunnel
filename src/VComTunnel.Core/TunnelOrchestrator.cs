@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace VComTunnel.Core;
 
@@ -17,11 +18,15 @@ public sealed class TunnelOrchestrator
     private readonly TimeSpan _restartMaxDelay;
     private readonly TimeSpan _portReleaseRetryTimeout;
     private readonly TimeSpan _portReleaseRetryDelay;
+    private readonly TimeSpan _sessionStartTimeout;
     private readonly ConcurrentDictionary<string, ManagedTunnel> _tunnels = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _lastProcessErrors = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _restartVersions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, RestartBackoffState> _restartBackoffs = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _lastRunningByEndpoint = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<int, byte> _intentionalProcessStops = new();
+    private readonly object _runtimeStateLock = new();
+    private readonly string _runtimeStatePath;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _mappingLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
@@ -37,7 +42,8 @@ public sealed class TunnelOrchestrator
         TimeSpan? restartDelay = null,
         TimeSpan? portReleaseRetryTimeout = null,
         TimeSpan? portReleaseRetryDelay = null,
-        TimeSpan? restartMaxDelay = null)
+        TimeSpan? restartMaxDelay = null,
+        TimeSpan? sessionStartTimeout = null)
     {
         _configStore = configStore;
         _dependencyDetector = dependencyDetector;
@@ -47,6 +53,11 @@ public sealed class TunnelOrchestrator
         _log = log;
         _kmdfSessionFactory = kmdfSessionFactory ?? ((mapping, sessionLog, faulted) => new KmdfTunnelSession(mapping, sessionLog, faulted));
         _com0comServiceSessionFactory = com0comServiceSessionFactory ?? ((mapping, sessionLog, faulted) => new Com0comServiceTunnelSession(mapping, sessionLog, faulted));
+        var configDirectory = Path.GetDirectoryName(_configStore.Path);
+        _runtimeStatePath = Path.Combine(
+            string.IsNullOrWhiteSpace(configDirectory) ? AppPaths.ProgramDataRoot : configDirectory,
+            "runtime-state.json");
+        LoadRuntimeState();
         _restartInitialDelay = restartDelay ?? TimeSpan.FromSeconds(2);
         _restartMaxDelay = restartMaxDelay ?? TimeSpan.FromMinutes(2);
         if (_restartInitialDelay <= TimeSpan.Zero)
@@ -61,6 +72,11 @@ public sealed class TunnelOrchestrator
 
         _portReleaseRetryTimeout = portReleaseRetryTimeout ?? TimeSpan.FromSeconds(3);
         _portReleaseRetryDelay = portReleaseRetryDelay ?? TimeSpan.FromMilliseconds(150);
+        _sessionStartTimeout = sessionStartTimeout ?? TimeSpan.FromSeconds(15);
+        if (_sessionStartTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sessionStartTimeout), "Session start timeout must be greater than zero.");
+        }
     }
 
     public async Task<VComTunnelConfig> GetConfigAsync(CancellationToken cancellationToken = default)
@@ -83,11 +99,86 @@ public sealed class TunnelOrchestrator
 
     public async Task StartAutoStartMappingsAsync(CancellationToken cancellationToken = default)
     {
-        var config = await _configStore.LoadAsync(cancellationToken);
-        foreach (var mapping in config.Mappings.Where(m => m.AutoStart))
+        var config = await _configStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var autoStartMappings = SelectAutoStartMappings(config.Mappings.Where(m => m.AutoStart).ToArray());
+        var starts = autoStartMappings
+            .Select(mapping => StartAutoStartMappingAsync(mapping, cancellationToken))
+            .ToArray();
+
+        await Task.WhenAll(starts).ConfigureAwait(false);
+    }
+
+    private async Task StartAutoStartMappingAsync(TunnelMapping mapping, CancellationToken cancellationToken)
+    {
+        try
         {
-            await StartAsync(mapping.Id, cancellationToken);
+            await StartAsync(mapping.Id, cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _log.Error(mapping.Name, $"AutoStart failed: {ex.Message}");
+        }
+    }
+
+    private IReadOnlyList<TunnelMapping> SelectAutoStartMappings(IReadOnlyList<TunnelMapping> mappings)
+    {
+        var endpointGroups = mappings
+            .Select((Mapping, Index) => new AutoStartCandidate(Mapping, Index))
+            .GroupBy(candidate => EndpointKey(candidate.Mapping), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
+        var selectedByEndpoint = new Dictionary<string, AutoStartCandidate>(StringComparer.OrdinalIgnoreCase);
+        var reasonByEndpoint = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (endpoint, candidates) in endpointGroups)
+        {
+            AutoStartCandidate? selected = null;
+            if (_lastRunningByEndpoint.TryGetValue(endpoint, out var lastRunningId))
+            {
+                selected = candidates.LastOrDefault(candidate => string.Equals(candidate.Mapping.Id, lastRunningId, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (selected is null)
+            {
+                selected = candidates[^1];
+                reasonByEndpoint[endpoint] = "no last-running history exists; using the last configured AutoStart mapping as fallback";
+            }
+            else
+            {
+                reasonByEndpoint[endpoint] = "it is the last mapping that successfully reached Running for this endpoint";
+            }
+
+            selectedByEndpoint[endpoint] = selected;
+        }
+
+        var selectedMappings = new List<TunnelMapping>();
+        var addedEndpoints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < mappings.Count; i++)
+        {
+            var mapping = mappings[i];
+            var endpoint = EndpointKey(mapping);
+            var winner = selectedByEndpoint[endpoint];
+            if (!string.Equals(winner.Mapping.Id, mapping.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                StopExisting(mapping.Id);
+                _lastProcessErrors.TryRemove(mapping.Id, out _);
+                ResetRestartBackoff(mapping.Id);
+                _tunnels[mapping.Id] = new ManagedTunnel(mapping, TunnelRunState.Stopped, null, null, null, null);
+                _log.Info(
+                    mapping.Name,
+                    $"AutoStart skipped because {winner.Mapping.Name} ({winner.Mapping.VisiblePort}) is selected for RFC2217 endpoint {FormatEndpoint(mapping)}: {reasonByEndpoint[endpoint]}.");
+                continue;
+            }
+
+            if (addedEndpoints.Add(endpoint))
+            {
+                selectedMappings.Add(mapping);
+            }
+        }
+
+        return selectedMappings;
     }
 
     public async Task<TunnelStatus> StartAsync(string id, CancellationToken cancellationToken = default)
@@ -210,6 +301,7 @@ public sealed class TunnelOrchestrator
 
         var tunnel = new ManagedTunnel(mapping, TunnelRunState.Running, process, null, DateTimeOffset.UtcNow, null);
         _tunnels[id] = tunnel;
+        RecordRunning(mapping);
         _log.Info(mapping.Name, $"Started hub4com process {process.Id}.");
         ResetRestartBackoff(id);
 
@@ -307,9 +399,17 @@ public sealed class TunnelOrchestrator
 
             try
             {
-                await session.StartAsync(cancellationToken);
+                await StartSessionWithTimeoutAsync(mapping, session, cancellationToken).ConfigureAwait(false);
+                if (!IsCurrentSession(mapping.Id, session))
+                {
+                    session.Dispose();
+                    _log.Info(mapping.Name, $"Ignored stale {FormatBackendForLog(mapping.Backend)} startup completion after the tunnel was stopped or replaced.");
+                    return CurrentStatusOrStopped(mapping);
+                }
+
                 var running = new ManagedTunnel(mapping, TunnelRunState.Running, null, session, DateTimeOffset.UtcNow, null);
                 _tunnels[mapping.Id] = running;
+                RecordRunning(mapping);
                 ResetRestartBackoff(mapping.Id);
                 return running.ToStatus();
             }
@@ -318,14 +418,31 @@ public sealed class TunnelOrchestrator
                 && DateTimeOffset.UtcNow < retryUntil)
             {
                 session.Dispose();
+                if (!IsCurrentSession(mapping.Id, session))
+                {
+                    _log.Info(mapping.Name, $"Ignored stale {FormatBackendForLog(mapping.Backend)} startup retry after the tunnel was stopped or replaced: {ex.Message}");
+                    return CurrentStatusOrStopped(mapping);
+                }
+
                 _log.Info(
                     mapping.Name,
                     $"Backing port {mapping.BackingPort} is still busy after stopping the previous backend; retrying in {_portReleaseRetryDelay.TotalMilliseconds:0} ms.");
-                await Task.Delay(_portReleaseRetryDelay, cancellationToken);
+                await Task.Delay(_portReleaseRetryDelay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                session.Dispose();
+                throw;
             }
             catch (Exception ex)
             {
                 session.Dispose();
+                if (!IsCurrentSession(mapping.Id, session))
+                {
+                    _log.Info(mapping.Name, $"Ignored stale {FormatBackendForLog(mapping.Backend)} startup failure after the tunnel was stopped or replaced: {ex.Message}");
+                    return CurrentStatusOrStopped(mapping);
+                }
+
                 var faulted = new ManagedTunnel(mapping, TunnelRunState.Faulted, null, null, null, ex.Message);
                 _tunnels[mapping.Id] = faulted;
                 if (logStartupFailure)
@@ -342,6 +459,49 @@ public sealed class TunnelOrchestrator
                 return faulted.ToStatus();
             }
         }
+    }
+
+    private async Task StartSessionWithTimeoutAsync(TunnelMapping mapping, IManagedTunnelSession session, CancellationToken cancellationToken)
+    {
+        using var startCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var startTask = Task.Run(() => session.StartAsync(startCts.Token), CancellationToken.None);
+        var timeoutTask = Task.Delay(_sessionStartTimeout, cancellationToken);
+        var completed = await Task.WhenAny(startTask, timeoutTask).ConfigureAwait(false);
+        if (completed == startTask)
+        {
+            await startTask.ConfigureAwait(false);
+            return;
+        }
+
+        startCts.Cancel();
+        ObserveLateSessionStart(startTask);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        throw new TimeoutException($"{FormatBackendForLog(mapping.Backend)} startup timed out after {FormatRestartDelay(_sessionStartTimeout)}.");
+    }
+
+    private static void ObserveLateSessionStart(Task startTask)
+    {
+        _ = startTask.ContinueWith(
+            task => _ = task.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private bool IsCurrentSession(string id, IManagedTunnelSession session)
+    {
+        return _tunnels.TryGetValue(id, out var existing) && ReferenceEquals(existing.Session, session);
+    }
+
+    private TunnelStatus CurrentStatusOrStopped(TunnelMapping mapping)
+    {
+        return _tunnels.TryGetValue(mapping.Id, out var existing)
+            ? existing.ToStatus()
+            : new ManagedTunnel(mapping, TunnelRunState.Stopped, null, null, null, null).ToStatus();
     }
 
     private void OnKmdfFaulted(TunnelMapping mapping, IKmdfTunnelSession session, string error)
@@ -536,11 +696,67 @@ public sealed class TunnelOrchestrator
         };
     }
 
+    private void LoadRuntimeState()
+    {
+        try
+        {
+            if (!File.Exists(_runtimeStatePath))
+            {
+                return;
+            }
+
+            var state = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(_runtimeStatePath));
+            if (state is null)
+            {
+                return;
+            }
+
+            foreach (var (endpoint, mappingId) in state)
+            {
+                if (!string.IsNullOrWhiteSpace(endpoint) && !string.IsNullOrWhiteSpace(mappingId))
+                {
+                    _lastRunningByEndpoint[endpoint] = mappingId;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            _log.Warn("runtime", $"Could not load runtime state: {ex.Message}");
+        }
+    }
+
+    private void RecordRunning(TunnelMapping mapping)
+    {
+        _lastRunningByEndpoint[EndpointKey(mapping)] = mapping.Id;
+        SaveRuntimeState();
+    }
+
+    private void SaveRuntimeState()
+    {
+        try
+        {
+            lock (_runtimeStateLock)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(_runtimeStatePath)!);
+                var tempPath = _runtimeStatePath + ".tmp";
+                var snapshot = _lastRunningByEndpoint.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+                File.WriteAllText(tempPath, JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true }));
+                File.Move(tempPath, _runtimeStatePath, overwrite: true);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _log.Warn("runtime", $"Could not save runtime state: {ex.Message}");
+        }
+    }
     private static bool UsesSameEndpoint(TunnelMapping left, TunnelMapping right)
     {
-        return left.Protocol == right.Protocol
-            && left.Port == right.Port
-            && string.Equals(left.Host.Trim(), right.Host.Trim(), StringComparison.OrdinalIgnoreCase);
+        return string.Equals(EndpointKey(left), EndpointKey(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string EndpointKey(TunnelMapping mapping)
+    {
+        return $"{mapping.Protocol}|{mapping.Host.Trim()}|{mapping.Port}";
     }
 
     private static string FormatEndpoint(TunnelMapping mapping)
@@ -652,6 +868,8 @@ public sealed class TunnelOrchestrator
         int Attempt,
         TimeSpan Delay,
         string LastError);
+
+    private sealed record AutoStartCandidate(TunnelMapping Mapping, int Index);
 
     private sealed record ManagedTunnel(
         TunnelMapping Mapping,
