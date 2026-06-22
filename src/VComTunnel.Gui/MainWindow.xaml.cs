@@ -39,6 +39,8 @@ public partial class MainWindow : Window
     private bool _savingMappings;
     private bool _suppressAutoSave;
     private CancellationTokenSource? _autoSaveCts;
+    private CancellationTokenSource? _postServiceStartRefreshCts;
+    private bool _localTemporaryServiceStartedByGui;
     private UiLanguage _language = GuiText.DefaultLanguage;
 
     public MainWindow()
@@ -54,10 +56,17 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
-        base.OnClosed(e);
         _autoSaveCts?.Cancel();
         _autoSaveCts?.Dispose();
+        _postServiceStartRefreshCts?.Cancel();
+        _postServiceStartRefreshCts?.Dispose();
+        if (_localTemporaryServiceStartedByGui)
+        {
+            StopLocalServiceProcesses();
+        }
+
         _client.Dispose();
+        base.OnClosed(e);
     }
 
     private string T(string key) => GuiText.Get(_language, key);
@@ -461,7 +470,8 @@ public partial class MainWindow : Window
             await RefreshLogsAsync();
             if (!dependencyStale)
             {
-                ServiceStateText.Text = FormatServiceSummary(serviceStatus, _mappings.Count);
+                var serviceHostMode = await GetServiceHostModeAsync();
+                ServiceStateText.Text = FormatServiceSummary(serviceStatus, _mappings.Count, serviceHostMode);
             }
         }
         catch (Exception ex)
@@ -829,8 +839,10 @@ public partial class MainWindow : Window
 
         if (await WaitForServiceAsync(TimeSpan.FromSeconds(20)))
         {
+            _localTemporaryServiceStartedByGui = false;
             await RefreshAsync();
-            SetStatus(T("Status.BackgroundServiceReady"));
+            SetStatus(T("Status.WindowsBackgroundServiceReady"));
+            SchedulePostServiceStartRefresh();
             return true;
         }
 
@@ -932,8 +944,10 @@ public partial class MainWindow : Window
             {
                 if (await WaitForServiceAsync(TimeSpan.FromSeconds(10)))
                 {
+                    _localTemporaryServiceStartedByGui = false;
                     await RefreshAsync();
-                    SetStatus(T("Status.BackgroundServiceReady"));
+                    SetStatus(T("Status.WindowsBackgroundServiceReady"));
+                    SchedulePostServiceStartRefresh();
                     return;
                 }
 
@@ -946,8 +960,10 @@ public partial class MainWindow : Window
 
             if (force && await StartInstalledWindowsServiceElevatedAsync())
             {
+                _localTemporaryServiceStartedByGui = false;
                 await RefreshAsync();
-                SetStatus(T("Status.BackgroundServiceReady"));
+                SetStatus(T("Status.WindowsBackgroundServiceReady"));
+                SchedulePostServiceStartRefresh();
                 return;
             }
 
@@ -960,8 +976,10 @@ public partial class MainWindow : Window
 
         if (await TryStartInstalledWindowsServiceAsync())
         {
+            _localTemporaryServiceStartedByGui = false;
             await RefreshAsync();
-            SetStatus(T("Status.BackgroundServiceReady"));
+            SetStatus(T("Status.WindowsBackgroundServiceReady"));
+            SchedulePostServiceStartRefresh();
             return;
         }
 
@@ -985,6 +1003,7 @@ public partial class MainWindow : Window
                 CreateNoWindow = true,
                 WorkingDirectory = Path.GetDirectoryName(servicePath)!
             });
+            _localTemporaryServiceStartedByGui = true;
         }
         catch (Exception ex)
         {
@@ -997,7 +1016,8 @@ public partial class MainWindow : Window
         if (await WaitForServiceAsync(TimeSpan.FromSeconds(10)))
         {
             await RefreshAsync();
-            SetStatus(T("Status.BackgroundServiceReady"));
+            SetStatus(T("Status.LocalServiceProcessReady"));
+            SchedulePostServiceStartRefresh();
             return;
         }
 
@@ -1200,7 +1220,13 @@ public partial class MainWindow : Window
             }
         }
 
-        return await WaitForServiceAsync(TimeSpan.FromSeconds(10));
+        var ready = await WaitForServiceAsync(TimeSpan.FromSeconds(10));
+        if (ready)
+        {
+            _localTemporaryServiceStartedByGui = false;
+        }
+
+        return ready;
     }
 
     private async Task<bool> TryStopInstalledWindowsServiceAsync()
@@ -1277,6 +1303,31 @@ public partial class MainWindow : Window
         return false;
     }
 
+    private void SchedulePostServiceStartRefresh()
+    {
+        _postServiceStartRefreshCts?.Cancel();
+        _postServiceStartRefreshCts?.Dispose();
+        _postServiceStartRefreshCts = new CancellationTokenSource();
+        _ = RefreshAfterServiceAutoStartAsync(_postServiceStartRefreshCts.Token);
+    }
+
+    private async Task RefreshAfterServiceAutoStartAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            if (cancellationToken.IsCancellationRequested || !await IsServiceReadyAsync())
+            {
+                return;
+            }
+
+            await RefreshAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     private async Task<bool> WaitForServiceOfflineAsync(TimeSpan timeout)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;
@@ -1341,6 +1392,11 @@ public partial class MainWindow : Window
             }
         }
 
+        if (stoppedAny)
+        {
+            _localTemporaryServiceStartedByGui = false;
+        }
+
         return stoppedAny;
     }
 
@@ -1384,18 +1440,38 @@ public partial class MainWindow : Window
         return status;
     }
 
-    private string FormatServiceSummary(ServiceStatus? status, int mappingCount)
+    private async Task<ServiceHostMode> GetServiceHostModeAsync()
     {
+        if (_localTemporaryServiceStartedByGui)
+        {
+            return ServiceHostMode.LocalTemporary;
+        }
+
+        var service = await GetInstalledWindowsServiceInfoAsync();
+        return IsCurrentInstalledWindowsService(service) && service.State == InstalledWindowsServiceState.Running
+            ? ServiceHostMode.WindowsBackground
+            : ServiceHostMode.LocalTemporary;
+    }
+
+    private string FormatServiceSummary(ServiceStatus? status, int mappingCount, ServiceHostMode serviceHostMode)
+    {
+        var connectedKey = serviceHostMode == ServiceHostMode.WindowsBackground
+            ? "Status.WindowsServiceConnected"
+            : "Status.LocalServiceConnected";
+        var connectedDetailedKey = serviceHostMode == ServiceHostMode.WindowsBackground
+            ? "Status.WindowsServiceConnectedDetailed"
+            : "Status.LocalServiceConnectedDetailed";
+
         if (status is null)
         {
-            return TF("Status.ServiceConnected", mappingCount);
+            return TF(connectedKey, mappingCount);
         }
 
         var running = status.Tunnels.Count(t => t.State is TunnelRunState.Starting or TunnelRunState.Running);
         var faulted = status.Tunnels.Count(t => t.State is TunnelRunState.Faulted);
         return running > 0 || faulted > 0
-            ? TF("Status.ServiceConnectedDetailed", mappingCount, running, faulted)
-            : TF("Status.ServiceConnected", mappingCount);
+            ? TF(connectedDetailedKey, mappingCount, running, faulted)
+            : TF(connectedKey, mappingCount);
     }
 
     private static string? ResolveServicePath()
@@ -1696,6 +1772,7 @@ public partial class MainWindow : Window
             if (installedService.State == InstalledWindowsServiceState.Running
                 && await WaitForServiceAsync(TimeSpan.FromSeconds(10)))
             {
+                _localTemporaryServiceStartedByGui = false;
                 return true;
             }
 
@@ -1732,6 +1809,7 @@ public partial class MainWindow : Window
                 CreateNoWindow = true,
                 WorkingDirectory = Path.GetDirectoryName(servicePath)!
             });
+            _localTemporaryServiceStartedByGui = true;
         }
         catch (Exception ex)
         {
@@ -3297,6 +3375,12 @@ internal sealed record KmdfWaitResult(bool Success, string? FailureMessage);
 internal sealed record ProcessRunResult(int ExitCode, string Output, string Error);
 
 internal sealed record InstalledWindowsServiceInfo(InstalledWindowsServiceState State, string? BinaryPath);
+
+internal enum ServiceHostMode
+{
+    WindowsBackground,
+    LocalTemporary
+}
 
 internal enum InstalledWindowsServiceState
 {
