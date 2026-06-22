@@ -62,7 +62,14 @@ public partial class MainWindow : Window
         _postServiceStartRefreshCts?.Dispose();
         if (_localTemporaryServiceStartedByGui)
         {
-            StopLocalServiceProcesses();
+            if (HasRunningCurrentInstalledWindowsService())
+            {
+                _localTemporaryServiceStartedByGui = false;
+            }
+            else
+            {
+                StopLocalServiceProcesses();
+            }
         }
 
         _client.Dispose();
@@ -624,6 +631,7 @@ public partial class MainWindow : Window
             if (await WaitForInstalledServiceStateAsync(InstalledWindowsServiceState.Running, TimeSpan.FromSeconds(20))
                 && await WaitForServiceAsync(TimeSpan.FromSeconds(12)))
             {
+                _localTemporaryServiceStartedByGui = false;
                 await RefreshAsync();
                 SetStatus(T("Status.ServiceInstalled"));
                 return true;
@@ -1183,6 +1191,19 @@ public partial class MainWindow : Window
         return service.State != InstalledWindowsServiceState.NotInstalled
             && ServiceBinaryPathMatches(service.BinaryPath, ResolveServicePath());
     }
+
+    private bool HasRunningCurrentInstalledWindowsService()
+    {
+        try
+        {
+            var service = GetInstalledWindowsServiceInfoAsync().GetAwaiter().GetResult();
+            return IsCurrentInstalledWindowsService(service) && service.State == InstalledWindowsServiceState.Running;
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or IOException)
+        {
+            return false;
+        }
+    }
     private async Task<bool> TryStartInstalledWindowsServiceAsync()
     {
         if (!OperatingSystem.IsWindows())
@@ -1442,15 +1463,14 @@ public partial class MainWindow : Window
 
     private async Task<ServiceHostMode> GetServiceHostModeAsync()
     {
-        if (_localTemporaryServiceStartedByGui)
+        var service = await GetInstalledWindowsServiceInfoAsync();
+        if (IsCurrentInstalledWindowsService(service) && service.State == InstalledWindowsServiceState.Running)
         {
-            return ServiceHostMode.LocalTemporary;
+            _localTemporaryServiceStartedByGui = false;
+            return ServiceHostMode.WindowsBackground;
         }
 
-        var service = await GetInstalledWindowsServiceInfoAsync();
-        return IsCurrentInstalledWindowsService(service) && service.State == InstalledWindowsServiceState.Running
-            ? ServiceHostMode.WindowsBackground
-            : ServiceHostMode.LocalTemporary;
+        return ServiceHostMode.LocalTemporary;
     }
 
     private string FormatServiceSummary(ServiceStatus? status, int mappingCount, ServiceHostMode serviceHostMode)
