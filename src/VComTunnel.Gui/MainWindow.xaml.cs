@@ -1093,6 +1093,23 @@ public partial class MainWindow : Window
         }
     }
 
+    private static InstalledWindowsServiceInfo GetInstalledWindowsServiceInfo()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return new InstalledWindowsServiceInfo(InstalledWindowsServiceState.NotInstalled, null);
+        }
+
+        var query = RunProcess("sc.exe", ["query", "VComTunnel"]);
+        if (query.ExitCode != 0)
+        {
+            return new InstalledWindowsServiceInfo(InstalledWindowsServiceState.NotInstalled, null);
+        }
+
+        var config = RunProcess("sc.exe", ["qc", "VComTunnel"]);
+        return BuildInstalledWindowsServiceInfo(query, config);
+    }
+
     private async Task<InstalledWindowsServiceInfo> GetInstalledWindowsServiceInfoAsync()
     {
         if (!OperatingSystem.IsWindows())
@@ -1106,6 +1123,12 @@ public partial class MainWindow : Window
             return new InstalledWindowsServiceInfo(InstalledWindowsServiceState.NotInstalled, null);
         }
 
+        var config = await RunProcessAsync("sc.exe", ["qc", "VComTunnel"]);
+        return BuildInstalledWindowsServiceInfo(query, config);
+    }
+
+    private static InstalledWindowsServiceInfo BuildInstalledWindowsServiceInfo(ProcessRunResult query, ProcessRunResult config)
+    {
         var text = $"{query.Output} {query.Error}";
         var state = InstalledWindowsServiceState.Installed;
         if (text.Contains("RUNNING", StringComparison.OrdinalIgnoreCase))
@@ -1117,7 +1140,6 @@ public partial class MainWindow : Window
             state = InstalledWindowsServiceState.Stopped;
         }
 
-        var config = await RunProcessAsync("sc.exe", ["qc", "VComTunnel"]);
         var binaryPath = config.ExitCode == 0
             ? ExtractServiceBinaryPath(config.Output)
             : null;
@@ -1196,7 +1218,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var service = GetInstalledWindowsServiceInfoAsync().GetAwaiter().GetResult();
+            var service = GetInstalledWindowsServiceInfo();
             return IsCurrentInstalledWindowsService(service) && service.State == InstalledWindowsServiceState.Running;
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or IOException)
@@ -1280,7 +1302,37 @@ public partial class MainWindow : Window
         return true;
     }
 
+    private static ProcessRunResult RunProcess(string fileName, IReadOnlyList<string> arguments)
+    {
+        var startInfo = CreateProcessStartInfo(fileName, arguments);
+        using var process = Process.Start(startInfo);
+        if (process is null)
+        {
+            return new ProcessRunResult(1, "", $"Could not start {fileName}.");
+        }
+
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return new ProcessRunResult(process.ExitCode, output, error);
+    }
+
     private static async Task<ProcessRunResult> RunProcessAsync(string fileName, IReadOnlyList<string> arguments)
+    {
+        var startInfo = CreateProcessStartInfo(fileName, arguments);
+        using var process = Process.Start(startInfo);
+        if (process is null)
+        {
+            return new ProcessRunResult(1, "", $"Could not start {fileName}.");
+        }
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        return new ProcessRunResult(process.ExitCode, await outputTask, await errorTask);
+    }
+
+    private static ProcessStartInfo CreateProcessStartInfo(string fileName, IReadOnlyList<string> arguments)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -1296,16 +1348,7 @@ public partial class MainWindow : Window
             startInfo.ArgumentList.Add(argument);
         }
 
-        using var process = Process.Start(startInfo);
-        if (process is null)
-        {
-            return new ProcessRunResult(1, "", $"Could not start {fileName}.");
-        }
-
-        var outputTask = process.StandardOutput.ReadToEndAsync();
-        var errorTask = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        return new ProcessRunResult(process.ExitCode, await outputTask, await errorTask);
+        return startInfo;
     }
 
     private async Task<bool> WaitForServiceAsync(TimeSpan timeout)

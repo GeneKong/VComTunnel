@@ -22,8 +22,11 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com service reconstructs fast RTS pulse", () => Task.Run(Com0comServiceReconstructsFastRtsPulse)),
     ("com0com service control-line switch blocks forwarding", () => Task.Run(Com0comServiceControlLineSwitchBlocksForwarding)),
     ("com0com service runtime control-line update blocks forwarding", () => Task.Run(Com0comServiceRuntimeControlLineUpdateBlocksForwarding)),
+    ("com0com service remote serial settings update local state", () => Task.Run(Com0comServiceRemoteSerialSettingsUpdateLocalState)),
+    ("com0com service startup only queries serial settings", Com0comServiceStartupOnlyQueriesSerialSettingsAsync),
     ("running mapping options hot update on save", RunningMappingOptionsHotUpdateOnSaveAsync),
     ("restart option hot update cancels pending restart", RestartOptionHotUpdateCancelsPendingRestartAsync),
+    ("faulted mapping restart option hot update schedules restart", FaultedMappingRestartOptionHotUpdateSchedulesRestartAsync),
     ("com0com service RX pipeline writes small chunks", Com0comServiceRxPipelineWritesSmallChunksAsync),
     ("com0com service modem polling forwards RTS", Com0comServiceModemPollingForwardsRtsAsync),
     ("com0com service local handflow disables blocking flags", () => Task.Run(Com0comServiceLocalHandflowDisablesBlockingFlags)),
@@ -364,6 +367,124 @@ static void Com0comServiceRuntimeControlLineUpdateBlocksForwarding()
     AssertBytes(Rfc2217Client.BuildSetModemControl(null, true), InvokeCom0comUpdateSerialModemState(session, SerialPortSnapshot.Cts, SerialPortSnapshot.EventCts));
 }
 
+static void Com0comServiceRemoteSerialSettingsUpdateLocalState()
+{
+    using var temp = new TempDir();
+    using var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    var serial = new RecordingSerialPortEndpoint();
+    using var session = new Com0comServiceTunnelSession(
+        new TunnelMapping
+        {
+            Name = "Remote serial settings",
+            Backend = TunnelBackend.Com0comService,
+            VisiblePort = "COM97",
+            BackingPort = "CNCB97",
+            Host = "127.0.0.1",
+            Port = 5000
+        },
+        log,
+        (_, _) => { },
+        new RecordingSerialPortEndpointFactory(serial));
+
+    SetPrivateField(session, "_serial", serial);
+    SetPrivateField(session, "_lastSerialSnapshot", new SerialPortSnapshot(0, 115200, 8, 0, 0));
+
+    InvokeCom0comApplyNotification(session, new Rfc2217Notification(Rfc2217Client.AckSetBaudRate, Rfc2217Client.BuildUInt32Payload(9600)));
+    InvokeCom0comApplyNotification(session, new Rfc2217Notification(Rfc2217Client.AckSetDataSize, [7]));
+    InvokeCom0comApplyNotification(session, new Rfc2217Notification(Rfc2217Client.AckSetParity, [3]));
+    InvokeCom0comApplyNotification(session, new Rfc2217Notification(Rfc2217Client.AckSetStopSize, [2]));
+
+    var settings = serial.GetSettings();
+    AssertEqual("9600", settings.BaudRate.ToString());
+    AssertEqual("7", settings.ByteSize.ToString());
+    AssertEqual("2", settings.Parity.ToString());
+    AssertEqual("2", settings.StopBits.ToString());
+}
+
+static async Task Com0comServiceStartupOnlyQueriesSerialSettingsAsync()
+{
+    using var temp = new TempDir();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    var startupBytes = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var serverTask = Task.Run(async () =>
+    {
+        using var client = await listener.AcceptTcpClientAsync(cts.Token);
+        TunnelTcpOptions.ConfigureLowLatency(client);
+        var stream = client.GetStream();
+        var buffer = new byte[4096];
+        _ = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cts.Token);
+        await stream.WriteAsync(Concat(
+            BuildRfc2217Ack(Rfc2217Client.AckSetLineStateMask, 0xFF),
+            BuildRfc2217Ack(Rfc2217Client.AckSetModemStateMask, 0xFF)), cts.Token);
+
+        var collected = new List<byte>();
+        while (!cts.IsCancellationRequested)
+        {
+            using var idle = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+            idle.CancelAfter(TimeSpan.FromMilliseconds(100));
+            try
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), idle.Token);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                collected.AddRange(buffer.Take(read));
+                continue;
+            }
+            catch (OperationCanceledException) when (!cts.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        startupBytes.TrySetResult(collected.ToArray());
+        await Task.Delay(Timeout.InfiniteTimeSpan, cts.Token);
+    }, cts.Token);
+
+    var serial = new RecordingSerialPortEndpoint();
+    using var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    using var session = new Com0comServiceTunnelSession(
+        new TunnelMapping
+        {
+            Name = "Startup query only",
+            Backend = TunnelBackend.Com0comService,
+            VisiblePort = "COM98",
+            BackingPort = "CNCB98",
+            Host = IPAddress.Loopback.ToString(),
+            Port = port
+        },
+        log,
+        (_, _) => { },
+        new RecordingSerialPortEndpointFactory(serial));
+
+    try
+    {
+        await session.StartAsync(cts.Token);
+        var bytes = await startupBytes.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+        AssertTrue(ContainsSequence(bytes, Rfc2217Client.BuildStartupStatusQuery()), "Startup should query serial/control state after RFC2217 negotiation.");
+        AssertTrue(!ContainsSequence(bytes, Rfc2217Client.BuildSetBaudRate(115200)), "Startup must not force baud rate to 115200.");
+        AssertTrue(!ContainsSequence(bytes, Rfc2217Client.BuildSetLineControl(0, 0, 8)), "Startup must not force 8N1 line control.");
+    }
+    finally
+    {
+        session.Dispose();
+        await cts.CancelAsync();
+        listener.Stop();
+        try
+        {
+            await serverTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+}
+
 static async Task RunningMappingOptionsHotUpdateOnSaveAsync()
 {
     using var temp = new TempDir();
@@ -475,6 +596,58 @@ static async Task RestartOptionHotUpdateCancelsPendingRestartAsync()
     AssertStringContains(
         string.Join("\n", log.Snapshot().Select(entry => entry.Message)),
         "Runtime restart-on-failure option disabled");
+}
+
+static async Task FaultedMappingRestartOptionHotUpdateSchedulesRestartAsync()
+{
+    using var temp = new TempDir();
+    var mapping = new TunnelMapping
+    {
+        Id = "resume-restart",
+        Name = "Resume restart",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM96",
+        BackingPort = "CNCB96",
+        Host = "127.0.0.1",
+        Port = 5000,
+        RestartOnFailure = false
+    };
+    var store = await StoreWithMappingAsync(temp.Path, mapping);
+    var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    var starts = 0;
+    HotUpdateManagedTunnelSession? session = null;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM96", "CNCB96"],
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            Interlocked.Increment(ref starts);
+            session = new HotUpdateManagedTunnelSession(faulted);
+            return session;
+        },
+        restartDelay: TimeSpan.FromMilliseconds(50));
+
+    var started = await orchestrator.StartAsync("resume-restart");
+    AssertEqual(TunnelRunState.Running.ToString(), started.State.ToString());
+
+    session!.Fault("temporary network failure");
+
+    // RestartOnFailure is disabled, so the fault alone must not schedule a restart.
+    await Task.Delay(150);
+    AssertEqual("1", Volatile.Read(ref starts).ToString());
+
+    var errors = await orchestrator.SaveConfigAsync(new VComTunnelConfig { Mappings = [mapping with { RestartOnFailure = true }] });
+    AssertEqual("0", errors.Count.ToString());
+
+    await WaitUntilAsync(
+        () => Volatile.Read(ref starts) >= 2,
+        "Enabling restart-on-failure on a faulted tunnel did not schedule a restart.");
+
+    AssertStringContains(
+        string.Join("\n", log.Snapshot().Select(entry => entry.Message)),
+        "Runtime restart-on-failure option enabled");
 }
 
 static async Task Com0comServiceModemPollingForwardsRtsAsync()
@@ -2568,6 +2741,24 @@ static byte[] InvokeCom0comUpdateSerialModemState(Com0comServiceTunnelSession se
         ?? throw new Exception("UpdateSerialModemState returned a frame without Bytes."));
 }
 
+static void InvokeCom0comApplyNotification(Com0comServiceTunnelSession session, Rfc2217Notification notification)
+{
+    var method = typeof(Com0comServiceTunnelSession).GetMethod(
+        "ApplyNotification",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+        ?? throw new Exception("ApplyNotification reflection target missing.");
+    method.Invoke(session, [notification]);
+}
+
+static void SetPrivateField(object instance, string name, object value)
+{
+    var field = instance.GetType().GetField(
+        name,
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+        ?? throw new Exception($"{name} reflection target missing.");
+    field.SetValue(instance, value);
+}
+
 static async Task WaitForStreamBytesAsync(NetworkStream stream, byte[] expected, TimeSpan timeout)
 {
     using var timeoutCts = new CancellationTokenSource(timeout);
@@ -2717,6 +2908,7 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
     private TaskCompletionSource _bytesWritten = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _totalBytes;
     private uint _modemStatus;
+    private SerialPortSettings _settings = new(115200, 8, 0, 0);
 
     public bool SupportsModemStatusEvents => false;
 
@@ -2738,9 +2930,27 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
         return ValueTask.CompletedTask;
     }
 
-    public SerialPortSnapshot GetSnapshot() => new(0, 115200, 8, 0, 0);
+    public SerialPortSnapshot GetSnapshot()
+    {
+        var settings = GetSettings();
+        return new SerialPortSnapshot(Volatile.Read(ref _modemStatus), settings.BaudRate, settings.ByteSize, settings.Parity, settings.StopBits);
+    }
 
-    public SerialPortSettings GetSettings() => new(115200, 8, 0, 0);
+    public SerialPortSettings GetSettings()
+    {
+        lock (_lock)
+        {
+            return _settings;
+        }
+    }
+
+    public void SetSettings(SerialPortSettings settings)
+    {
+        lock (_lock)
+        {
+            _settings = settings;
+        }
+    }
 
     public uint GetModemStatus() => Volatile.Read(ref _modemStatus);
 

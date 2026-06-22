@@ -13,10 +13,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private const int SerialRxWriteChunkBytes = 256;
     private const int SerialRxQueueCapacityChunks = 256;
     private const int SerialRxQueueWarnBytes = 32 * 1024;
-    private const uint StartupBaudRate = 115200;
-    private const byte StartupByteSize = 8;
-    private const byte StartupParity = 0;
-    private const byte StartupStopBits = 0;
+
     private static readonly TimeSpan SerialModemPollInterval = TimeSpan.FromMilliseconds(1);
     private static readonly TimeSpan SerialSettingsPollInterval = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan CommandAckTimeout = Rfc2217Client.RecommendedCommandAckTimeout;
@@ -124,18 +121,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                 Rfc2217Client.BuildInitialExpectedAcks(),
                 "initial-negotiation",
                 ContinueOnAckTimeout: true)).ConfigureAwait(false);
-        await SendFrameWithAckAsync(
-            stream,
-            new Rfc2217OutboundFrame(
-                Rfc2217Client.BuildSetBaudRate(StartupBaudRate),
-                [],
-                $"startup-baud-rate {StartupBaudRate}")).ConfigureAwait(false);
-        await SendFrameWithAckAsync(
-            stream,
-            new Rfc2217OutboundFrame(
-                Rfc2217Client.BuildSetLineControl(StartupStopBits, StartupParity, StartupByteSize),
-                [],
-                "startup-line-control 8N1")).ConfigureAwait(false);
+
         await SendFrameWithAckAsync(
             stream,
             new Rfc2217OutboundFrame(
@@ -614,6 +600,12 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         if (Rfc2217Client.IsCommandAck(notification.Command))
         {
             var pendingAck = CompletePendingAck(notification);
+            if (pendingAck == PendingAckResult.CompletedWithAcceptedSerialSetting)
+            {
+                ApplyRemoteSerialSetting(notification);
+                return;
+            }
+
             if (pendingAck == PendingAckResult.CompletedWithAcceptedSetControl)
             {
                 _log.Warn(_mapping.Name, $"RFC2217 peer accepted SET-CONTROL {DescribeSetControlNotification(notification)}.");
@@ -625,15 +617,15 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                 return;
             }
 
+            if (ApplyRemoteSerialSetting(notification))
+            {
+                return;
+            }
+
             if (notification.Command == Rfc2217Client.AckSetControl && notification.Payload.Length == 1)
             {
                 _log.Info(_mapping.Name, $"RFC2217 remote control state {DescribeSetControlNotification(notification)}.");
                 return;
-            }
-
-            if (Rfc2217Client.IsAcceptedSerialSetting(notification))
-            {
-                _log.Info(_mapping.Name, $"RFC2217 remote serial setting {Rfc2217ExpectedAck.Describe(notification)}.");
             }
 
             return;
@@ -804,6 +796,16 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                     _pendingAckCompletion = null;
                 }
             }
+            else if ((index = _pendingAcks.FindIndex(expected => expected.MatchesAcceptedValue(notification))) >= 0)
+            {
+                result = PendingAckResult.CompletedWithAcceptedSerialSetting;
+                _pendingAcks.RemoveAt(index);
+                if (_pendingAcks.Count == 0)
+                {
+                    completion = _pendingAckCompletion;
+                    _pendingAckCompletion = null;
+                }
+            }
             else if ((index = _pendingAcks.FindIndex(expected => expected.MatchesAcceptedSetControlValue(notification))) >= 0)
             {
                 result = PendingAckResult.CompletedWithAcceptedSetControl;
@@ -881,6 +883,71 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         }
     }
 
+    private bool ApplyRemoteSerialSetting(Rfc2217Notification notification)
+    {
+        var serial = _serial;
+        if (serial is null)
+        {
+            return false;
+        }
+
+        SerialPortSnapshot previous;
+        lock (_serialStateLock)
+        {
+            previous = _lastSerialSnapshot ?? serial.GetSnapshot();
+        }
+
+        if (!TryApplyRemoteSerialSetting(previous, notification, out var current))
+        {
+            return false;
+        }
+
+        serial.SetSettings(new SerialPortSettings(current.BaudRate, current.ByteSize, current.Parity, current.StopBits));
+        lock (_serialStateLock)
+        {
+            var baseline = _lastSerialSnapshot ?? previous;
+            _lastSerialSnapshot = current with { ModemStatus = baseline.ModemStatus };
+        }
+
+        _log.Info(_mapping.Name, $"RFC2217 remote serial setting accepted {Rfc2217ExpectedAck.Describe(notification)}.");
+        return true;
+    }
+
+    private static bool TryApplyRemoteSerialSetting(SerialPortSnapshot previous, Rfc2217Notification notification, out SerialPortSnapshot current)
+    {
+        current = previous;
+        if (notification.Command == Rfc2217Client.AckSetBaudRate)
+        {
+            if (notification.Payload.Length != 4)
+            {
+                return false;
+            }
+
+            var baudRate = Rfc2217Client.ReadUInt32Payload(notification.Payload);
+            if (baudRate == 0)
+            {
+                return false;
+            }
+
+            current = previous with { BaudRate = baudRate };
+            return true;
+        }
+
+        if (notification.Payload.Length != 1 || notification.Payload[0] == 0)
+        {
+            return false;
+        }
+
+        current = notification.Command switch
+        {
+            Rfc2217Client.AckSetDataSize => previous with { ByteSize = notification.Payload[0] },
+            Rfc2217Client.AckSetParity => previous with { Parity = Rfc2217Client.MapRfc2217ParityToWindows(notification.Payload[0]) },
+            Rfc2217Client.AckSetStopSize => previous with { StopBits = Rfc2217Client.MapRfc2217StopBitsToWindows(notification.Payload[0]) },
+            _ => previous
+        };
+        return current != previous;
+    }
+
     private void Fault(Exception ex)
     {
         LastError = ex.Message;
@@ -921,6 +988,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     {
         NotPending,
         Completed,
+        CompletedWithAcceptedSerialSetting,
         CompletedWithAcceptedSetControl,
         Failed
     }
@@ -944,6 +1012,7 @@ public interface ISerialPortEndpoint : IDisposable
     ValueTask WriteAsync(byte[] bytes, CancellationToken cancellationToken, Action<SerialPortBackpressureInfo>? backpressure = null);
     SerialPortSnapshot GetSnapshot();
     SerialPortSettings GetSettings();
+    void SetSettings(SerialPortSettings settings);
     uint GetModemStatus();
     uint WaitForModemStatusChange(CancellationToken cancellationToken);
 }
@@ -1184,6 +1253,7 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
     private readonly bool _supportsModemStatusEvents;
     private readonly object _readLock = new();
     private readonly object _writeLock = new();
+    private readonly object _settingsLock = new();
     private readonly object _waitCommEventLock = new();
 
     private Win32SerialPortEndpoint(SafeFileHandle handle, bool supportsModemStatusEvents)
@@ -1306,13 +1376,38 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
 
     public SerialPortSettings GetSettings()
     {
-        var dcb = new Dcb { DCBlength = (uint)Marshal.SizeOf<Dcb>() };
-        if (!GetCommState(_handle, ref dcb))
+        lock (_settingsLock)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-        }
+            var dcb = new Dcb { DCBlength = (uint)Marshal.SizeOf<Dcb>() };
+            if (!GetCommState(_handle, ref dcb))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
 
-        return new SerialPortSettings(dcb.BaudRate, dcb.ByteSize, dcb.Parity, dcb.StopBits);
+            return new SerialPortSettings(dcb.BaudRate, dcb.ByteSize, dcb.Parity, dcb.StopBits);
+        }
+    }
+
+    public void SetSettings(SerialPortSettings settings)
+    {
+        lock (_settingsLock)
+        {
+            var dcb = new Dcb { DCBlength = (uint)Marshal.SizeOf<Dcb>() };
+            if (!GetCommState(_handle, ref dcb))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            dcb.BaudRate = settings.BaudRate;
+            dcb.ByteSize = settings.ByteSize;
+            dcb.Parity = settings.Parity;
+            dcb.StopBits = settings.StopBits;
+            dcb.Flags = NormalizeLocalSerialFlags(dcb.Flags);
+            if (!SetCommState(_handle, ref dcb))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        }
     }
 
     public uint GetModemStatus()

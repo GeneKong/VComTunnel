@@ -111,8 +111,16 @@ public sealed class TunnelOrchestrator
 
             var previous = existing.Mapping;
             var status = existing.ToStatus();
+
+            // Compare-and-swap so a concurrent fault/stop callback that already replaced this
+            // entry is not clobbered with a stale snapshot. If the swap fails the tunnel changed
+            // under us, so skip the hot update (including the session) entirely.
+            if (!_tunnels.TryUpdate(mapping.Id, existing with { Mapping = mapping }, existing))
+            {
+                continue;
+            }
+
             existing.Session?.UpdateMapping(mapping);
-            _tunnels[mapping.Id] = existing with { Mapping = mapping };
             ApplyRestartOptionChange(previous, mapping, status);
 
             if (status.State is TunnelRunState.Stopped)
