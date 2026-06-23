@@ -37,7 +37,7 @@ public sealed class Com0comSetupManager
         }
 
         return BuildPlan(
-            $"install PortName={mapping.VisiblePort} PortName={mapping.BackingPort}",
+            $"install PortName={mapping.VisiblePort},EmuBR=yes PortName={mapping.BackingPort}",
             $"Create com0com pair {mapping.VisiblePort} <-> {mapping.BackingPort}");
     }
 

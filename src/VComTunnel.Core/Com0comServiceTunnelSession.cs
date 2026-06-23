@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Sockets;
@@ -13,6 +14,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private const int SerialRxWriteChunkBytes = 256;
     private const int SerialRxQueueCapacityChunks = 256;
     private const int SerialRxQueueWarnBytes = 32 * 1024;
+    private const byte Com0comPeerSettingsEscapeChar = 0xFF;
 
     private static readonly TimeSpan SerialModemPollInterval = TimeSpan.FromMilliseconds(1);
     private static readonly TimeSpan SerialSettingsPollInterval = TimeSpan.FromMilliseconds(50);
@@ -38,6 +40,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     });
     private readonly ByteThroughputLogThrottle _serialTxLog = new(TimeSpan.FromSeconds(1));
     private readonly ByteThroughputLogThrottle _serialRxLog = new(TimeSpan.FromSeconds(1));
+    private readonly Com0comPeerSettingsParser _peerSettingsParser = new(Com0comPeerSettingsEscapeChar);
     private readonly object _serialStateLock = new();
     private readonly CancellationTokenSource _stop = new();
     private int _forwardControlLines;
@@ -57,6 +60,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private Task? _keepAliveLoop;
     private SerialPortSnapshot? _lastSerialSnapshot;
     private bool _pollModemState;
+    private bool _peerSettingsInsertionEnabled;
     private int _disposed;
 
     public Com0comServiceTunnelSession(
@@ -100,6 +104,9 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             throw new IOException(BuildBackingPortOpenError(_mapping, ex), ex);
         }
 
+        var peerSettingsInsertion = _serial.EnablePeerSettingsInsertion(Com0comPeerSettingsEscapeChar);
+        _peerSettingsInsertionEnabled = peerSettingsInsertion.Enabled;
+
         _tcp = new TcpClient();
         TunnelTcpOptions.ConfigureLowLatency(_tcp);
         try
@@ -122,19 +129,34 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                 "initial-negotiation",
                 ContinueOnAckTimeout: true)).ConfigureAwait(false);
 
+        var startupSnapshot = ApplyPeerSettingsInsertionEvents(_serial.GetSnapshot(), peerSettingsInsertion.InitialBytes);
+        var startupSettingsFrame = BuildSettingsChangeFrame(
+            new SerialPortSnapshot(startupSnapshot.ModemStatus, 0, 0, 0, 0),
+            startupSnapshot);
+        await SendFrameWithAckAsync(stream, startupSettingsFrame).ConfigureAwait(false);
+
         await SendFrameWithAckAsync(
             stream,
             new Rfc2217OutboundFrame(
-                Rfc2217Client.BuildStartupStatusQuery(),
+                Rfc2217Client.BuildQueryControlState(),
                 [],
-                "startup-status-query")).ConfigureAwait(false);
+                "startup-control-state-query")).ConfigureAwait(false);
 
         State = TunnelRunState.Running;
         _log.Info(_mapping.Name, $"Started com0com service tunnel {_mapping.BackingPort} -> {_mapping.Host}:{_mapping.Port}.");
+        if (_peerSettingsInsertionEnabled)
+        {
+            _log.Info(_mapping.Name, "com0com peer serial-setting events enabled through IOCTL_SERIAL_LSRMST_INSERT for baud/data/parity/stop.");
+        }
+        else
+        {
+            var peerSettingsMessage = string.IsNullOrWhiteSpace(peerSettingsInsertion.Message) ? "" : $" ({peerSettingsInsertion.Message})";
+            _log.Info(_mapping.Name, $"com0com peer serial-setting events unavailable; falling back to {SerialSettingsPollInterval.TotalMilliseconds:0} ms local DCB polling for baud/data/parity/stop{peerSettingsMessage}.");
+        }
 
         lock (_serialStateLock)
         {
-            _lastSerialSnapshot = _serial.GetSnapshot();
+            _lastSerialSnapshot = startupSnapshot;
         }
 
         _pollModemState = !_serial.SupportsModemStatusEvents;
@@ -150,7 +172,11 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         }
 
         _serialLoop = Task.Run(SerialLoopAsync);
-        _serialSettingsLoop = Task.Run(SerialSettingsLoopAsync);
+        if (!_peerSettingsInsertionEnabled)
+        {
+            _serialSettingsLoop = Task.Run(SerialSettingsLoopAsync);
+        }
+
         _keepAliveLoop = Task.Run(KeepAliveLoopAsync);
     }
 
@@ -183,23 +209,48 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                     continue;
                 }
 
-                var requestedBaudRate = _espToolBaudRate.ObserveOutbound(buffer, 0, read);
-                if (requestedBaudRate is not null)
-                {
-                    _log.Info(_mapping.Name, $"Detected esptool baud-rate change request {requestedBaudRate.Value}.");
-                }
+                IReadOnlyList<Com0comSerialInputEvent> events = _peerSettingsInsertionEnabled
+                    ? _peerSettingsParser.Parse(buffer, 0, read)
+                    : [new Com0comSerialInputEvent(buffer.AsMemory(0, read).ToArray(), null)];
 
-                await WaitForRemoteFlowAsync().ConfigureAwait(false);
-                if (Rfc2217Client.RequiresSerialDataEscaping(buffer, 0, read))
+                foreach (var inputEvent in events)
                 {
-                    await WriteNetworkAsync(stream, Rfc2217Client.EscapeSerialData(buffer, 0, read)).ConfigureAwait(false);
-                }
-                else
-                {
-                    await WriteNetworkAsync(stream, buffer.AsMemory(0, read)).ConfigureAwait(false);
-                }
+                    if (inputEvent.PeerSettings is { } settings)
+                    {
+                        var frame = UpdateSerialSettings(settings);
+                        if (frame.Bytes.Length > 0)
+                        {
+                            await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
+                            _log.Info(_mapping.Name, frame.Description);
+                        }
 
-                LogSerialTx(read);
+                        continue;
+                    }
+
+                    if (inputEvent.SerialData.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    var serialData = inputEvent.SerialData;
+                    var requestedBaudRate = _espToolBaudRate.ObserveOutbound(serialData, 0, serialData.Length);
+                    if (requestedBaudRate is not null)
+                    {
+                        _log.Info(_mapping.Name, $"Detected esptool baud-rate change request {requestedBaudRate.Value}.");
+                    }
+
+                    await WaitForRemoteFlowAsync().ConfigureAwait(false);
+                    if (Rfc2217Client.RequiresSerialDataEscaping(serialData, 0, serialData.Length))
+                    {
+                        await WriteNetworkAsync(stream, Rfc2217Client.EscapeSerialData(serialData, 0, serialData.Length)).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await WriteNetworkAsync(stream, serialData).ConfigureAwait(false);
+                    }
+
+                    LogSerialTx(serialData.Length);
+                }
             }
         }
         catch (Exception ex) when (!_stop.IsCancellationRequested)
@@ -324,6 +375,39 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             _lastSerialSnapshot = current;
             return BuildSettingsChangeFrame(previous, current);
         }
+    }
+
+    private Rfc2217OutboundFrame UpdateSerialSettings(Com0comPeerSettingsChange settings)
+    {
+        lock (_serialStateLock)
+        {
+            var previous = _lastSerialSnapshot ?? _serial!.GetSnapshot();
+            var current = settings.Apply(previous);
+            _lastSerialSnapshot = current;
+            var frame = BuildSettingsChangeFrame(previous, current);
+            return frame.Bytes.Length == 0
+                ? frame
+                : frame with { Description = $"RFC2217 com0com peer serial setting {frame.Description} sent without ACK wait." };
+        }
+    }
+
+    private SerialPortSnapshot ApplyPeerSettingsInsertionEvents(SerialPortSnapshot snapshot, byte[] bytes)
+    {
+        if (bytes.Length == 0)
+        {
+            return snapshot;
+        }
+
+        var current = snapshot;
+        foreach (var inputEvent in _peerSettingsParser.Parse(bytes, 0, bytes.Length))
+        {
+            if (inputEvent.PeerSettings is { } settings)
+            {
+                current = settings.Apply(current);
+            }
+        }
+
+        return current;
     }
 
     private Rfc2217OutboundFrame UpdateSerialModemState(uint currentModemStatus, uint eventMask)
@@ -902,7 +986,6 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             return false;
         }
 
-        serial.SetSettings(new SerialPortSettings(current.BaudRate, current.ByteSize, current.Parity, current.StopBits));
         lock (_serialStateLock)
         {
             var baseline = _lastSerialSnapshot ?? previous;
@@ -975,7 +1058,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             ? $" Mapping expects {mapping.VisiblePort} <-> {mapping.BackingPort}."
             : "";
         var createHint = !string.IsNullOrWhiteSpace(mapping.BackingPort)
-            ? $" If the pair is missing, create it first: setupc.exe install PortName={mapping.VisiblePort} PortName={mapping.BackingPort}."
+            ? $" If the pair is missing, create it first: setupc.exe install PortName={mapping.VisiblePort},EmuBR=yes PortName={mapping.BackingPort}."
             : "";
         var busyHint = exception.NativeErrorCode == 5
             ? " ERROR 5 usually means the backing port is already open by another mapping, hub4com/com2tcp, or a serial tool; stop that process and retry."
@@ -1002,17 +1085,137 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
 
     private sealed record SerialRxChunk(byte[] Bytes);
 
+    private sealed record Com0comSerialInputEvent(byte[] SerialData, Com0comPeerSettingsChange? PeerSettings);
+
+    private readonly record struct Com0comPeerSettingsChange(
+        uint? BaudRate = null,
+        byte? ByteSize = null,
+        byte? Parity = null,
+        byte? StopBits = null)
+    {
+        public SerialPortSnapshot Apply(SerialPortSnapshot previous)
+        {
+            return previous with
+            {
+                BaudRate = BaudRate ?? previous.BaudRate,
+                ByteSize = ByteSize ?? previous.ByteSize,
+                Parity = Parity ?? previous.Parity,
+                StopBits = StopBits ?? previous.StopBits
+            };
+        }
+    }
+
+    private sealed class Com0comPeerSettingsParser(byte escapeChar)
+    {
+        private const byte SerialLsrMstEscape = 0;
+        private const byte InsertBaudRate = 16;
+        private const byte InsertLineControl = 17;
+
+        private readonly byte[] _payload = new byte[4];
+        private ParserState _state;
+        private byte _code;
+        private int _payloadLength;
+        private int _payloadOffset;
+        private List<byte>? _serialData;
+
+        public IReadOnlyList<Com0comSerialInputEvent> Parse(byte[] buffer, int offset, int length)
+        {
+            var events = new List<Com0comSerialInputEvent>();
+            for (var i = 0; i < length; i++)
+            {
+                var value = buffer[offset + i];
+                switch (_state)
+                {
+                    case ParserState.SerialData:
+                        if (value == escapeChar)
+                        {
+                            FlushSerialData(events);
+                            _state = ParserState.EscapeCode;
+                        }
+                        else
+                        {
+                            AddSerialData(value);
+                        }
+                        break;
+
+                    case ParserState.EscapeCode:
+                        if (value == SerialLsrMstEscape)
+                        {
+                            AddSerialData(escapeChar);
+                            _state = ParserState.SerialData;
+                        }
+                        else if (value is InsertBaudRate or InsertLineControl)
+                        {
+                            _code = value;
+                            _payloadLength = value == InsertBaudRate ? 4 : 3;
+                            _payloadOffset = 0;
+                            _state = ParserState.Payload;
+                        }
+                        else
+                        {
+                            AddSerialData(escapeChar);
+                            AddSerialData(value);
+                            _state = ParserState.SerialData;
+                        }
+                        break;
+
+                    case ParserState.Payload:
+                        _payload[_payloadOffset++] = value;
+                        if (_payloadOffset == _payloadLength)
+                        {
+                            events.Add(new Com0comSerialInputEvent([], BuildPeerSettingsChange()));
+                            _state = ParserState.SerialData;
+                        }
+                        break;
+                }
+            }
+
+            FlushSerialData(events);
+            return events;
+        }
+
+        private Com0comPeerSettingsChange BuildPeerSettingsChange()
+        {
+            return _code == InsertBaudRate
+                ? new Com0comPeerSettingsChange(BaudRate: BinaryPrimitives.ReadUInt32LittleEndian(_payload))
+                : new Com0comPeerSettingsChange(ByteSize: _payload[0], Parity: _payload[1], StopBits: _payload[2]);
+        }
+
+        private void AddSerialData(byte value)
+        {
+            (_serialData ??= []).Add(value);
+        }
+
+        private void FlushSerialData(List<Com0comSerialInputEvent> events)
+        {
+            if (_serialData is null || _serialData.Count == 0)
+            {
+                return;
+            }
+
+            events.Add(new Com0comSerialInputEvent(_serialData.ToArray(), null));
+            _serialData.Clear();
+        }
+
+        private enum ParserState
+        {
+            SerialData,
+            EscapeCode,
+            Payload
+        }
+    }
+
 
 }
 
 public interface ISerialPortEndpoint : IDisposable
 {
     bool SupportsModemStatusEvents { get; }
+    SerialPeerSettingsInsertion EnablePeerSettingsInsertion(byte escapeChar);
     ValueTask<int> ReadAsync(byte[] buffer, CancellationToken cancellationToken);
     ValueTask WriteAsync(byte[] bytes, CancellationToken cancellationToken, Action<SerialPortBackpressureInfo>? backpressure = null);
     SerialPortSnapshot GetSnapshot();
     SerialPortSettings GetSettings();
-    void SetSettings(SerialPortSettings settings);
     uint GetModemStatus();
     uint WaitForModemStatusChange(CancellationToken cancellationToken);
 }
@@ -1038,6 +1241,11 @@ public readonly record struct SerialPortSettings(
     byte ByteSize,
     byte Parity,
     byte StopBits);
+
+public readonly record struct SerialPeerSettingsInsertion(bool Enabled, byte[] InitialBytes, string? Message = null)
+{
+    public static SerialPeerSettingsInsertion Unavailable(string? message = null) => new(false, [], message);
+}
 
 public sealed record SerialPortBackpressureInfo(int BytesWritten, int TotalBytes, TimeSpan Duration)
 {
@@ -1232,6 +1440,12 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
     private const uint OpenExisting = 3;
     private const uint FileAttributeNormal = 0x00000080;
     private const uint FileFlagOverlapped = 0x40000000;
+    private const uint IoctlSerialLsrMstInsert = 0x001B007C;
+    private const uint C0ceInsertIoctlCaps = 0xFFFFFFFF;
+    private const uint C0ceInsertIoctlGet = 0x01000000;
+    private const uint C0ceInsertIoctlRxClear = 0x02000000;
+    private const uint C0ceInsertEnableRbr = 0x00000100;
+    private const uint C0ceInsertEnableRlc = 0x00000200;
     private const uint EventCts = 0x00000008;
     private const uint EventDsr = 0x00000010;
     private const uint DcbBinary = 0x00000001;
@@ -1342,6 +1556,39 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
 
     public bool SupportsModemStatusEvents => _supportsModemStatusEvents;
 
+    public SerialPeerSettingsInsertion EnablePeerSettingsInsertion(byte escapeChar)
+    {
+        if (escapeChar == 0)
+        {
+            return SerialPeerSettingsInsertion.Unavailable("com0com LSRMST insertion escape char must be non-zero.");
+        }
+
+        lock (_settingsLock)
+        {
+            if (!TryGetCom0comInsertionCaps(out var caps, out var message))
+            {
+                return SerialPeerSettingsInsertion.Unavailable(message);
+            }
+
+            var enabled = caps & (C0ceInsertEnableRbr | C0ceInsertEnableRlc);
+            if (enabled == 0)
+            {
+                return SerialPeerSettingsInsertion.Unavailable("com0com driver does not advertise paired baud/line-control insertions.");
+            }
+
+            var opts = (C0ceInsertIoctlGet | C0ceInsertIoctlRxClear | enabled) & caps;
+            var input = BuildCom0comInsertionIoctlInput(escapeChar, opts);
+            var output = new byte[CalculateCom0comInsertionOutputLength(opts)];
+            if (!DeviceIoControl(_handle, IoctlSerialLsrMstInsert, input, input.Length, output, output.Length, out var returned, IntPtr.Zero))
+            {
+                return SerialPeerSettingsInsertion.Unavailable(new Win32Exception(Marshal.GetLastWin32Error()).Message);
+            }
+
+            var initialBytes = output.AsSpan(0, Math.Min((int)returned, output.Length)).ToArray();
+            return new SerialPeerSettingsInsertion(true, initialBytes);
+        }
+    }
+
     public ValueTask<int> ReadAsync(byte[] buffer, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -1388,26 +1635,55 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         }
     }
 
-    public void SetSettings(SerialPortSettings settings)
-    {
-        lock (_settingsLock)
-        {
-            var dcb = new Dcb { DCBlength = (uint)Marshal.SizeOf<Dcb>() };
-            if (!GetCommState(_handle, ref dcb))
-            {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            }
 
-            dcb.BaudRate = settings.BaudRate;
-            dcb.ByteSize = settings.ByteSize;
-            dcb.Parity = settings.Parity;
-            dcb.StopBits = settings.StopBits;
-            dcb.Flags = NormalizeLocalSerialFlags(dcb.Flags);
-            if (!SetCommState(_handle, ref dcb))
-            {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            }
+    private bool TryGetCom0comInsertionCaps(out uint caps, out string? message)
+    {
+        caps = 0;
+        message = null;
+        var input = BuildCom0comInsertionIoctlInput(0, C0ceInsertIoctlCaps);
+        var output = new byte[8];
+        if (!DeviceIoControl(_handle, IoctlSerialLsrMstInsert, input, input.Length, output, output.Length, out var returned, IntPtr.Zero))
+        {
+            message = new Win32Exception(Marshal.GetLastWin32Error()).Message;
+            return false;
         }
+
+        if (returned < output.Length || output[0] != (byte)'c' || output[1] != (byte)'0' || output[2] != (byte)'c' || output[3] != 0)
+        {
+            message = "serial driver does not expose com0com extended insertion capabilities.";
+            return false;
+        }
+
+        caps = BinaryPrimitives.ReadUInt32LittleEndian(output.AsSpan(4, 4));
+        return true;
+    }
+
+    private static byte[] BuildCom0comInsertionIoctlInput(byte escapeChar, uint opts)
+    {
+        var buffer = new byte[9];
+        buffer[0] = escapeChar;
+        buffer[1] = (byte)'c';
+        buffer[2] = (byte)'0';
+        buffer[3] = (byte)'c';
+        buffer[4] = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(5, 4), opts);
+        return buffer;
+    }
+
+    private static int CalculateCom0comInsertionOutputLength(uint opts)
+    {
+        var length = 0;
+        if ((opts & C0ceInsertEnableRbr) != 0)
+        {
+            length += 6;
+        }
+
+        if ((opts & C0ceInsertEnableRlc) != 0)
+        {
+            length += 5;
+        }
+
+        return length;
     }
 
     public uint GetModemStatus()
@@ -1727,6 +2003,17 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetCommModemStatus(SafeFileHandle hFile, out uint lpModemStat);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(
+        SafeFileHandle hDevice,
+        uint dwIoControlCode,
+        byte[] lpInBuffer,
+        int nInBufferSize,
+        byte[] lpOutBuffer,
+        int nOutBufferSize,
+        out uint lpBytesReturned,
+        IntPtr lpOverlapped);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetCommMask(SafeFileHandle hFile, uint dwEvtMask);

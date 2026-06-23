@@ -112,6 +112,22 @@ public sealed class TunnelOrchestrator
             var previous = existing.Mapping;
             var status = existing.ToStatus();
 
+            if (status.State is not TunnelRunState.Stopped && RequiresRestartForConfigChange(previous, mapping))
+            {
+                StopExisting(mapping.Id);
+                _lastProcessErrors.TryRemove(mapping.Id, out _);
+                ResetRestartBackoff(mapping.Id);
+                if (_tunnels.TryUpdate(
+                    mapping.Id,
+                    new ManagedTunnel(mapping, TunnelRunState.Stopped, null, null, null, null),
+                    existing))
+                {
+                    _log.Info(mapping.Name, "Stopped running tunnel because the saved mapping changed backend, COM port, endpoint, or protocol.");
+                }
+
+                continue;
+            }
+
             // Compare-and-swap so a concurrent fault/stop callback that already replaced this
             // entry is not clobbered with a stale snapshot. If the swap fails the tunnel changed
             // under us, so skip the hot update (including the session) entirely.
@@ -130,6 +146,16 @@ public sealed class TunnelOrchestrator
 
             LogRuntimeOptionChanges(previous, mapping, existing.Session is not null);
         }
+    }
+
+    private static bool RequiresRestartForConfigChange(TunnelMapping previous, TunnelMapping current)
+    {
+        return previous.Backend != current.Backend
+            || previous.Protocol != current.Protocol
+            || !string.Equals(previous.VisiblePort, current.VisiblePort, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(previous.BackingPort ?? "", current.BackingPort ?? "", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(previous.Host, current.Host, StringComparison.OrdinalIgnoreCase)
+            || previous.Port != current.Port;
     }
 
     private void ApplyRestartOptionChange(TunnelMapping previous, TunnelMapping current, TunnelStatus previousStatus)
@@ -732,7 +758,7 @@ public sealed class TunnelOrchestrator
         var detail = _lastProcessErrors.TryGetValue(mapping.Id, out var lastError) ? $" Last error: {lastError}" : "";
         if (IsMissingBackingPortError(detail) && !string.IsNullOrWhiteSpace(mapping.BackingPort))
         {
-            detail += $" Create the com0com pair first: setupc.exe install PortName={mapping.VisiblePort} PortName={mapping.BackingPort}";
+            detail += $" Create the com0com pair first: setupc.exe install PortName={mapping.VisiblePort},EmuBR=yes PortName={mapping.BackingPort}";
         }
         else if (IsBackingPortAccessDeniedError(detail) && !string.IsNullOrWhiteSpace(mapping.BackingPort))
         {
@@ -966,7 +992,7 @@ public sealed class TunnelOrchestrator
             return true;
         }
 
-        error = $"Backing port {mapping.BackingPort} is not registered in the Windows COM database. Existing ports: {string.Join(", ", ports)}. Choose the other side of an existing com0com pair, or create it first: setupc.exe install PortName={mapping.VisiblePort} PortName={mapping.BackingPort}";
+        error = $"Backing port {mapping.BackingPort} is not registered in the Windows COM database. Existing ports: {string.Join(", ", ports)}. Choose the other side of an existing com0com pair, or create it first: setupc.exe install PortName={mapping.VisiblePort},EmuBR=yes PortName={mapping.BackingPort}";
         return false;
     }
 

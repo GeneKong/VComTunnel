@@ -24,8 +24,10 @@ public partial class MainWindow : Window
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
+    private static readonly TimeSpan RuntimeStatusRefreshInterval = TimeSpan.FromSeconds(5);
 
     private readonly HttpClient _client = new() { BaseAddress = new Uri(ServiceEndpoint.DefaultUrl) };
+    private readonly System.Windows.Threading.DispatcherTimer _runtimeStatusRefreshTimer = new() { Interval = RuntimeStatusRefreshInterval };
     private readonly ObservableCollection<MappingRow> _mappings = [];
     private readonly ObservableCollection<ComPairRow> _comPairs = [];
     private readonly List<string> _guiLogLines = [];
@@ -38,6 +40,8 @@ public partial class MainWindow : Window
     private bool _updatingSelection;
     private bool _savingMappings;
     private bool _suppressAutoSave;
+    private bool _runtimeStatusRefreshActive;
+    private bool _fullRefreshActive;
     private CancellationTokenSource? _autoSaveCts;
     private CancellationTokenSource? _postServiceStartRefreshCts;
     private bool _localTemporaryServiceStartedByGui;
@@ -51,11 +55,14 @@ public partial class MainWindow : Window
         ComPairsList.ItemsSource = _comPairs;
         ApplyLocalization();
         UpdateMappingCommandState();
+        _runtimeStatusRefreshTimer.Tick += RuntimeStatusRefreshTimer_Tick;
         Loaded += MainWindow_Loaded;
     }
 
     protected override void OnClosed(EventArgs e)
     {
+        _runtimeStatusRefreshTimer.Stop();
+        _runtimeStatusRefreshTimer.Tick -= RuntimeStatusRefreshTimer_Tick;
         _autoSaveCts?.Cancel();
         _autoSaveCts?.Dispose();
         _postServiceStartRefreshCts?.Cancel();
@@ -230,6 +237,66 @@ public partial class MainWindow : Window
         {
             SetStatus(TF("Status.InitialRefreshFailed", ex.Message), "error");
         }
+        finally
+        {
+            StartRuntimeStatusRefreshTimer();
+        }
+    }
+
+    private void StartRuntimeStatusRefreshTimer()
+    {
+        if (!_runtimeStatusRefreshTimer.IsEnabled)
+        {
+            _runtimeStatusRefreshTimer.Start();
+        }
+    }
+
+    private async void RuntimeStatusRefreshTimer_Tick(object? sender, EventArgs e)
+    {
+        await RefreshRuntimeStatusAsync();
+    }
+
+    private async Task RefreshRuntimeStatusAsync()
+    {
+        if (_runtimeStatusRefreshActive || _fullRefreshActive || _serviceRestarting || _dependencySetupActive || _savingMappings || _suppressAutoSave)
+        {
+            return;
+        }
+
+        _runtimeStatusRefreshActive = true;
+        try
+        {
+            if (!await IsServiceReadyAsync())
+            {
+                await ShowServiceOfflineAsync();
+                return;
+            }
+
+            var serviceHostMode = await GetConnectedServiceHostModeAsync();
+            var serviceStatus = await RefreshMappingStatesAsync(serviceHostMode);
+            await RefreshLogsAsync();
+            ServiceStateText.Text = FormatServiceSummary(serviceStatus, _mappings.Count, serviceHostMode);
+        }
+        catch (Exception ex) when (IsLocalServiceApiException(ex))
+        {
+            await ShowServiceOfflineAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(TF("Status.RuntimeStatusRefreshFailed", ex.Message), "warn");
+        }
+        finally
+        {
+            _runtimeStatusRefreshActive = false;
+        }
+    }
+
+    private async Task ShowServiceOfflineAsync()
+    {
+        var expectedServiceHostMode = await GetExpectedServiceHostModeAsync();
+        ServiceStateText.Text = T(expectedServiceHostMode == ServiceHostMode.WindowsBackground
+            ? "Status.WindowsServiceOffline"
+            : "Status.LocalServiceOffline");
     }
 
     private void EnglishLanguageMenuItem_Click(object sender, RoutedEventArgs e) => SetLanguage(UiLanguage.English);
@@ -442,9 +509,18 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_fullRefreshActive)
+        {
+            return;
+        }
+
+        _fullRefreshActive = true;
         try
         {
-            ServiceStateText.Text = T("Status.ServiceConnecting");
+            var serviceHostMode = await GetConnectedServiceHostModeAsync();
+            ServiceStateText.Text = T(serviceHostMode == ServiceHostMode.WindowsBackground
+                ? "Status.WindowsServiceConnecting"
+                : "Status.LocalServiceConnecting");
             var dependencyStale = false;
             var mappings = await _client.GetFromJsonAsync<List<TunnelMapping>>("/api/mappings", JsonOptions) ?? [];
             _suppressAutoSave = true;
@@ -461,7 +537,7 @@ public partial class MainWindow : Window
                 _suppressAutoSave = false;
             }
 
-            var serviceStatus = await RefreshMappingStatesAsync();
+            var serviceStatus = await RefreshMappingStatesAsync(serviceHostMode);
             var dependencies = await _client.GetFromJsonAsync<SystemDependencyReport>("/api/dependencies", JsonOptions);
             DependenciesText.Text = FormatDependencies(dependencies);
             var localDependencies = new DependencyDetector().Detect();
@@ -477,15 +553,21 @@ public partial class MainWindow : Window
             await RefreshLogsAsync();
             if (!dependencyStale)
             {
-                var serviceHostMode = await GetServiceHostModeAsync();
                 ServiceStateText.Text = FormatServiceSummary(serviceStatus, _mappings.Count, serviceHostMode);
             }
         }
         catch (Exception ex)
         {
-            ServiceStateText.Text = T("Status.ServiceOffline");
+            var expectedServiceHostMode = await GetExpectedServiceHostModeAsync();
+            ServiceStateText.Text = T(expectedServiceHostMode == ServiceHostMode.WindowsBackground
+                ? "Status.WindowsServiceOffline"
+                : "Status.LocalServiceOffline");
             ClearComPairsList();
             DependenciesText.Text = BuildOfflineMessage(ex) + Environment.NewLine + Environment.NewLine + FormatDependencies(new DependencyDetector().Detect());
+        }
+        finally
+        {
+            _fullRefreshActive = false;
         }
     }
 
@@ -1487,7 +1569,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task<ServiceStatus?> RefreshMappingStatesAsync()
+    private async Task<ServiceStatus?> RefreshMappingStatesAsync(ServiceHostMode serviceHostMode)
     {
         var status = await _client.GetFromJsonAsync<ServiceStatus>("/api/status", JsonOptions);
         var stateById = status?.Tunnels.ToDictionary(t => t.Id, StringComparer.OrdinalIgnoreCase)
@@ -1496,7 +1578,8 @@ public partial class MainWindow : Window
         {
             row.ApplyServiceStatus(
                 stateById.TryGetValue(row.Id, out var tunnel) ? tunnel : null,
-                _language);
+                _language,
+                serviceHostMode);
         }
 
         MappingsGrid.Items.Refresh();
@@ -1504,7 +1587,7 @@ public partial class MainWindow : Window
         return status;
     }
 
-    private async Task<ServiceHostMode> GetServiceHostModeAsync()
+    private async Task<ServiceHostMode> GetConnectedServiceHostModeAsync()
     {
         var service = await GetInstalledWindowsServiceInfoAsync();
         if (IsCurrentInstalledWindowsService(service) && service.State == InstalledWindowsServiceState.Running)
@@ -1514,6 +1597,14 @@ public partial class MainWindow : Window
         }
 
         return ServiceHostMode.LocalTemporary;
+    }
+
+    private async Task<ServiceHostMode> GetExpectedServiceHostModeAsync()
+    {
+        var service = await GetInstalledWindowsServiceInfoAsync();
+        return IsCurrentInstalledWindowsService(service)
+            ? ServiceHostMode.WindowsBackground
+            : ServiceHostMode.LocalTemporary;
     }
 
     private string FormatServiceSummary(ServiceStatus? status, int mappingCount, ServiceHostMode serviceHostMode)
@@ -1751,7 +1842,8 @@ public partial class MainWindow : Window
             var message = FormatActionResult(action, response, responseBody);
             SetStatus(message, response.IsSuccessStatusCode ? "info" : "error");
             AppendGuiLog("debug", T("Log.Api"), responseBody);
-            await RefreshMappingStatesAsync();
+            var serviceHostMode = await GetConnectedServiceHostModeAsync();
+            await RefreshMappingStatesAsync(serviceHostMode);
             await RefreshLogsAsync();
             if (allowKmdfDriverRepair
                 && string.Equals(action, "start", StringComparison.OrdinalIgnoreCase)
@@ -3358,8 +3450,11 @@ public sealed class MappingRow : INotifyPropertyChanged
         };
     }
 
-    public void ApplyServiceStatus(TunnelStatus? status, UiLanguage language)
+    public ServiceHostMode ServiceHostMode { get; private set; } = ServiceHostMode.LocalTemporary;
+
+    public void ApplyServiceStatus(TunnelStatus? status, UiLanguage language, ServiceHostMode serviceHostMode)
     {
+        ServiceHostMode = serviceHostMode;
         ProcessId = status?.ProcessId;
         StartedAt = status?.StartedAt;
         LastError = status?.LastError;
@@ -3370,14 +3465,17 @@ public sealed class MappingRow : INotifyPropertyChanged
 
     public void RefreshServiceLabel(UiLanguage language)
     {
+        var prefix = ServiceHostMode == ServiceHostMode.WindowsBackground
+            ? "Mapping.WindowsService"
+            : "Mapping.LocalService";
         ServiceLabel = RunState switch
         {
-            TunnelRunState.Running when ProcessId is not null => GuiText.Format(language, "Mapping.ServiceRunningPid", ProcessId),
-            TunnelRunState.Running => GuiText.Get(language, "Mapping.ServiceRunning"),
-            TunnelRunState.Starting => GuiText.Get(language, "Mapping.ServiceStarting"),
-            TunnelRunState.Faulted when !string.IsNullOrWhiteSpace(LastError) => GuiText.Format(language, "Mapping.ServiceFaulted", Shorten(CollapseWhitespace(LastError!), 160)),
-            TunnelRunState.Faulted => GuiText.Get(language, "Mapping.ServiceFaultedUnknown"),
-            TunnelRunState.Unsupported => GuiText.Get(language, "Mapping.ServiceUnsupported"),
+            TunnelRunState.Running when ProcessId is not null => GuiText.Format(language, $"{prefix}RunningPid", ProcessId),
+            TunnelRunState.Running => GuiText.Get(language, $"{prefix}Running"),
+            TunnelRunState.Starting => GuiText.Get(language, $"{prefix}Starting"),
+            TunnelRunState.Faulted when !string.IsNullOrWhiteSpace(LastError) => GuiText.Format(language, $"{prefix}Faulted", Shorten(CollapseWhitespace(LastError!), 160)),
+            TunnelRunState.Faulted => GuiText.Get(language, $"{prefix}FaultedUnknown"),
+            TunnelRunState.Unsupported => GuiText.Get(language, $"{prefix}Unsupported"),
             _ => ""
         };
     }
@@ -3439,7 +3537,7 @@ internal sealed record ProcessRunResult(int ExitCode, string Output, string Erro
 
 internal sealed record InstalledWindowsServiceInfo(InstalledWindowsServiceState State, string? BinaryPath);
 
-internal enum ServiceHostMode
+public enum ServiceHostMode
 {
     WindowsBackground,
     LocalTemporary

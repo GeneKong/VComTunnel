@@ -41,7 +41,7 @@ public sealed class Hub4comCommandBuilder
             return "No com0com pair is needed for KMDF mappings.";
         }
 
-        return $"setupc.exe install PortName={mapping.VisiblePort} PortName={mapping.BackingPort}";
+        return $"setupc.exe install PortName={mapping.VisiblePort},EmuBR=yes PortName={mapping.BackingPort}";
     }
 
     private static string BuildNoControlLineArgs(TunnelMapping mapping)

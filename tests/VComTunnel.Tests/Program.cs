@@ -1,4 +1,5 @@
 using VComTunnel.Core;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
@@ -22,9 +23,12 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com service reconstructs fast RTS pulse", () => Task.Run(Com0comServiceReconstructsFastRtsPulse)),
     ("com0com service control-line switch blocks forwarding", () => Task.Run(Com0comServiceControlLineSwitchBlocksForwarding)),
     ("com0com service runtime control-line update blocks forwarding", () => Task.Run(Com0comServiceRuntimeControlLineUpdateBlocksForwarding)),
-    ("com0com service remote serial settings update local state", () => Task.Run(Com0comServiceRemoteSerialSettingsUpdateLocalState)),
-    ("com0com service startup only queries serial settings", Com0comServiceStartupOnlyQueriesSerialSettingsAsync),
+    ("com0com service remote serial settings do not overwrite local settings", () => Task.Run(Com0comServiceRemoteSerialSettingsDoNotOverwriteLocalSettings)),
+    ("com0com service startup syncs serial settings without control-line replay", Com0comServiceStartupSyncsSerialSettingsWithoutControlLineReplayAsync),
+    ("com0com service startup uses peer serial setting insertions", Com0comServiceStartupUsesPeerSerialSettingInsertionsAsync),
+    ("com0com service forwards peer serial setting insertions", Com0comServiceForwardsPeerSerialSettingInsertionsAsync),
     ("running mapping options hot update on save", RunningMappingOptionsHotUpdateOnSaveAsync),
+    ("running backend change stops old process on save", RunningBackendChangeStopsOldProcessOnSaveAsync),
     ("restart option hot update cancels pending restart", RestartOptionHotUpdateCancelsPendingRestartAsync),
     ("faulted mapping restart option hot update schedules restart", FaultedMappingRestartOptionHotUpdateSchedulesRestartAsync),
     ("com0com service RX pipeline writes small chunks", Com0comServiceRxPipelineWritesSmallChunksAsync),
@@ -291,10 +295,10 @@ static void Com0comCreateHints()
     var mapping = new TunnelMapping { Name = "A", VisiblePort = "COM12", BackingPort = "CNCB12" };
     var builder = new Hub4comCommandBuilder(new DependencyDetector());
     var hint = builder.BuildCom0comCreateHint(mapping);
-    AssertEqual("setupc.exe install PortName=COM12 PortName=CNCB12", hint);
+    AssertEqual("setupc.exe install PortName=COM12,EmuBR=yes PortName=CNCB12", hint);
 
     var serviceHint = builder.BuildCom0comCreateHint(mapping with { Backend = TunnelBackend.Com0comService });
-    AssertEqual("setupc.exe install PortName=COM12 PortName=CNCB12", serviceHint);
+    AssertEqual("setupc.exe install PortName=COM12,EmuBR=yes PortName=CNCB12", serviceHint);
 }
 
 static void Com0comServiceMapsPeerModemSignals()
@@ -367,7 +371,7 @@ static void Com0comServiceRuntimeControlLineUpdateBlocksForwarding()
     AssertBytes(Rfc2217Client.BuildSetModemControl(null, true), InvokeCom0comUpdateSerialModemState(session, SerialPortSnapshot.Cts, SerialPortSnapshot.EventCts));
 }
 
-static void Com0comServiceRemoteSerialSettingsUpdateLocalState()
+static void Com0comServiceRemoteSerialSettingsDoNotOverwriteLocalSettings()
 {
     using var temp = new TempDir();
     using var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
@@ -395,13 +399,18 @@ static void Com0comServiceRemoteSerialSettingsUpdateLocalState()
     InvokeCom0comApplyNotification(session, new Rfc2217Notification(Rfc2217Client.AckSetStopSize, [2]));
 
     var settings = serial.GetSettings();
-    AssertEqual("9600", settings.BaudRate.ToString());
-    AssertEqual("7", settings.ByteSize.ToString());
-    AssertEqual("2", settings.Parity.ToString());
-    AssertEqual("2", settings.StopBits.ToString());
+    AssertEqual("115200", settings.BaudRate.ToString());
+    AssertEqual("8", settings.ByteSize.ToString());
+    AssertEqual("0", settings.Parity.ToString());
+    AssertEqual("0", settings.StopBits.ToString());
+    AssertBytes(
+        Concat(
+            Rfc2217Client.BuildSetBaudRate(115200),
+            Rfc2217Client.BuildSetLineControl(stopBits: 0, parity: 0, wordLength: 8)),
+        InvokeCom0comUpdateSerialSettings(session, settings));
 }
 
-static async Task Com0comServiceStartupOnlyQueriesSerialSettingsAsync()
+static async Task Com0comServiceStartupSyncsSerialSettingsWithoutControlLineReplayAsync()
 {
     using var temp = new TempDir();
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -451,7 +460,7 @@ static async Task Com0comServiceStartupOnlyQueriesSerialSettingsAsync()
     using var session = new Com0comServiceTunnelSession(
         new TunnelMapping
         {
-            Name = "Startup query only",
+            Name = "Startup serial settings",
             Backend = TunnelBackend.Com0comService,
             VisiblePort = "COM98",
             BackingPort = "CNCB98",
@@ -466,9 +475,171 @@ static async Task Com0comServiceStartupOnlyQueriesSerialSettingsAsync()
     {
         await session.StartAsync(cts.Token);
         var bytes = await startupBytes.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
-        AssertTrue(ContainsSequence(bytes, Rfc2217Client.BuildStartupStatusQuery()), "Startup should query serial/control state after RFC2217 negotiation.");
-        AssertTrue(!ContainsSequence(bytes, Rfc2217Client.BuildSetBaudRate(115200)), "Startup must not force baud rate to 115200.");
-        AssertTrue(!ContainsSequence(bytes, Rfc2217Client.BuildSetLineControl(0, 0, 8)), "Startup must not force 8N1 line control.");
+        AssertTrue(ContainsSequence(bytes, Rfc2217Client.BuildSetBaudRate(115200)), "Startup should send the current local baud rate instead of querying baud=0.");
+        AssertTrue(ContainsSequence(bytes, Rfc2217Client.BuildSetLineControl(0, 0, 8)), "Startup should send the current local line control instead of querying data/parity/stop=0.");
+        AssertTrue(!ContainsSequence(bytes, Rfc2217Client.BuildSetBaudRate(0)), "Startup must not send an RFC2217 baud=0 query to devices that treat it as a rejected setting.");
+        AssertTrue(ContainsSequence(bytes, Rfc2217Client.BuildQueryControlState()), "Startup should still query remote control state without replaying local control lines.");
+        AssertTrue(!ContainsSequence(bytes, Rfc2217Client.BuildSetModemControl(false, false)), "Startup must not replay DTR/RTS off as explicit control-line updates.");
+        AssertTrue(!ContainsSequence(bytes, Rfc2217Client.BuildSetBreak(false)), "Startup must not replay BREAK off as an explicit control-line update.");
+    }
+    finally
+    {
+        session.Dispose();
+        await cts.CancelAsync();
+        listener.Stop();
+        try
+        {
+            await serverTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+}
+
+static async Task Com0comServiceStartupUsesPeerSerialSettingInsertionsAsync()
+{
+    using var temp = new TempDir();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    var startupBytes = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var serverTask = Task.Run(async () =>
+    {
+        using var client = await listener.AcceptTcpClientAsync(cts.Token);
+        TunnelTcpOptions.ConfigureLowLatency(client);
+        var stream = client.GetStream();
+        var buffer = new byte[4096];
+        _ = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cts.Token);
+        await stream.WriteAsync(Concat(
+            BuildRfc2217Ack(Rfc2217Client.AckSetLineStateMask, 0xFF),
+            BuildRfc2217Ack(Rfc2217Client.AckSetModemStateMask, 0xFF)), cts.Token);
+
+        var collected = new List<byte>();
+        while (!cts.IsCancellationRequested)
+        {
+            using var idle = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+            idle.CancelAfter(TimeSpan.FromMilliseconds(100));
+            try
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), idle.Token);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                collected.AddRange(buffer.Take(read));
+                continue;
+            }
+            catch (OperationCanceledException) when (!cts.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        startupBytes.TrySetResult(collected.ToArray());
+        await Task.Delay(Timeout.InfiniteTimeSpan, cts.Token);
+    }, cts.Token);
+
+    var serial = new RecordingSerialPortEndpoint();
+    serial.SetPeerSettingsInsertion(new SerialPeerSettingsInsertion(
+        true,
+        Concat(Com0comPeerBaudInsertion(19200), Com0comPeerLineInsertion(7, 2, 2))));
+    using var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    using var session = new Com0comServiceTunnelSession(
+        new TunnelMapping
+        {
+            Name = "Startup peer serial settings",
+            Backend = TunnelBackend.Com0comService,
+            VisiblePort = "COM96",
+            BackingPort = "CNCB96",
+            Host = IPAddress.Loopback.ToString(),
+            Port = port
+        },
+        log,
+        (_, _) => { },
+        new RecordingSerialPortEndpointFactory(serial));
+
+    try
+    {
+        await session.StartAsync(cts.Token);
+        var bytes = await startupBytes.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+        AssertTrue(ContainsSequence(bytes, Rfc2217Client.BuildSetBaudRate(19200)), "Startup should prefer the visible peer baud reported by com0com insertion events.");
+        AssertTrue(ContainsSequence(bytes, Rfc2217Client.BuildSetLineControl(stopBits: 2, parity: 2, wordLength: 7)), "Startup should prefer the visible peer line control reported by com0com insertion events.");
+        AssertTrue(!ContainsSequence(bytes, Rfc2217Client.BuildSetBaudRate(115200)), "Startup must not send the backing-port DCB baud when com0com reports visible peer settings.");
+        AssertStringContains(string.Join("\n", log.Snapshot().Select(entry => entry.Message)), "peer serial-setting events enabled");
+    }
+    finally
+    {
+        session.Dispose();
+        await cts.CancelAsync();
+        listener.Stop();
+        try
+        {
+            await serverTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+}
+
+static async Task Com0comServiceForwardsPeerSerialSettingInsertionsAsync()
+{
+    using var temp = new TempDir();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    var serverReady = new TaskCompletionSource<NetworkStream>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var serverTask = Task.Run(async () =>
+    {
+        using var client = await listener.AcceptTcpClientAsync(cts.Token);
+        TunnelTcpOptions.ConfigureLowLatency(client);
+        var stream = client.GetStream();
+        var buffer = new byte[4096];
+        _ = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cts.Token);
+        await stream.WriteAsync(Concat(
+            BuildRfc2217Ack(Rfc2217Client.AckSetLineStateMask, 0xFF),
+            BuildRfc2217Ack(Rfc2217Client.AckSetModemStateMask, 0xFF)), cts.Token);
+        serverReady.TrySetResult(stream);
+        await Task.Delay(Timeout.InfiniteTimeSpan, cts.Token);
+    }, cts.Token);
+
+    var serial = new RecordingSerialPortEndpoint();
+    serial.SetPeerSettingsInsertion(new SerialPeerSettingsInsertion(true, []));
+    using var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    using var session = new Com0comServiceTunnelSession(
+        new TunnelMapping
+        {
+            Name = "Peer serial settings",
+            Backend = TunnelBackend.Com0comService,
+            VisiblePort = "COM95",
+            BackingPort = "CNCB95",
+            Host = IPAddress.Loopback.ToString(),
+            Port = port
+        },
+        log,
+        (_, _) => { },
+        new RecordingSerialPortEndpointFactory(serial));
+
+    try
+    {
+        await session.StartAsync(cts.Token);
+        var stream = await serverReady.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+        serial.EnqueueRead(Com0comPeerBaudInsertion(230400));
+        await WaitForStreamBytesAsync(stream, Rfc2217Client.BuildSetBaudRate(230400), TimeSpan.FromSeconds(2));
+
+        serial.EnqueueRead(Com0comPeerLineInsertion(7, 2, 2));
+        await WaitForStreamBytesAsync(stream, Rfc2217Client.BuildSetLineControl(stopBits: 2, parity: 2, wordLength: 7), TimeSpan.FromSeconds(2));
+
+        serial.EnqueueRead([0x41, 0xFF, 0x00, 0x42]);
+        await WaitForStreamBytesAsync(stream, [0x41, 0xFF, 0xFF, 0x42], TimeSpan.FromSeconds(2));
+
+        var messages = string.Join("\n", log.Snapshot().Select(entry => entry.Message));
+        AssertStringContains(messages, "com0com peer serial setting baud=230400");
+        AssertStringContains(messages, "line data=7, parity=2, stop=2");
     }
     finally
     {
@@ -547,6 +718,50 @@ static async Task RunningMappingOptionsHotUpdateOnSaveAsync()
     AssertStringContains(messages, "Runtime control-line forwarding disabled");
     AssertStringContains(messages, "Runtime auto-start option enabled");
     AssertStringContains(messages, "Runtime restart-on-failure option disabled");
+}
+
+static async Task RunningBackendChangeStopsOldProcessOnSaveAsync()
+{
+    using var temp = new TempDir();
+    CreateFakeDependencies(temp.Path);
+    var mapping = new TunnelMapping
+    {
+        Id = "switch-backend",
+        Name = "Switch backend",
+        Backend = TunnelBackend.Com0comHub4com,
+        VisiblePort = "COM59",
+        BackingPort = "CNCB59",
+        Host = "127.0.0.1",
+        Port = 2217,
+        RestartOnFailure = true
+    };
+    var store = await StoreWithMappingAsync(temp.Path, mapping);
+    var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM59", "CNCB59"],
+        hub4comCommandFactory: map => BuildFakeHub4comCommand(temp.Path, map));
+
+    var started = await orchestrator.StartAsync(mapping.Id);
+    AssertEqual(TunnelRunState.Running.ToString(), started.State.ToString());
+    var oldProcessId = started.ProcessId ?? throw new Exception("Started hub4com process id was not reported.");
+
+    var updated = mapping with { Backend = TunnelBackend.Com0comService };
+    var errors = await orchestrator.SaveConfigAsync(new VComTunnelConfig { Mappings = [updated] });
+    AssertEqual("0", errors.Count.ToString());
+
+    await WaitUntilAsync(
+        () => ProcessHasExited(oldProcessId),
+        "Saving a backend change did not stop the old hub4com process.");
+
+    var status = orchestrator.GetStatus().Tunnels.Single(t => t.Id == mapping.Id);
+    AssertEqual(TunnelRunState.Stopped.ToString(), status.State.ToString());
+    AssertEqual("Com0comService", status.Backend);
+    AssertTrue(
+        log.Snapshot().Any(e => e.Message.Contains("Stopped running tunnel because the saved mapping changed", StringComparison.OrdinalIgnoreCase)),
+        "Backend-changing save should log that the old running tunnel was stopped.");
 }
 
 static async Task RestartOptionHotUpdateCancelsPendingRestartAsync()
@@ -2087,7 +2302,7 @@ static void Com0comServiceBackingOpenDiagnostics()
         mapping,
         new SerialPortOpenException("CNCB27", @"\\.\CNCB27", 2, "open"));
     AssertStringContains(notFound, "ERROR 2");
-    AssertStringContains(notFound, "setupc.exe install PortName=COM27 PortName=CNCB27");
+    AssertStringContains(notFound, "setupc.exe install PortName=COM27,EmuBR=yes PortName=CNCB27");
 
     var accessDenied = Com0comServiceTunnelSession.BuildBackingPortOpenError(
         mapping,
@@ -2274,11 +2489,11 @@ static async Task Com0comCreateAndRemovePlansAsync()
         new FakeComPortInventory(["COM28", "CNCB28"], [new Com0comPairInfo(2, "COM28", "CNCB28", @"\Device\com0com12", @"\Device\com0com22", true)]));
 
     var create = await manager.BuildCreatePlanAsync("hub");
-    AssertStringContains(create.Arguments, "install PortName=COM29 PortName=CNCB29");
+    AssertStringContains(create.Arguments, "install PortName=COM29,EmuBR=yes PortName=CNCB29");
     AssertTrue(create.RequiresElevation, "setupc plans should require elevation.");
 
     var serviceCreate = await manager.BuildCreatePlanAsync("svc");
-    AssertStringContains(serviceCreate.Arguments, "install PortName=COM30 PortName=CNCB30");
+    AssertStringContains(serviceCreate.Arguments, "install PortName=COM30,EmuBR=yes PortName=CNCB30");
 
     var remove = manager.BuildRemovePlan(2);
     AssertStringContains(remove.Arguments, "remove 2");
@@ -2741,6 +2956,21 @@ static byte[] InvokeCom0comUpdateSerialModemState(Com0comServiceTunnelSession se
         ?? throw new Exception("UpdateSerialModemState returned a frame without Bytes."));
 }
 
+static byte[] InvokeCom0comUpdateSerialSettings(Com0comServiceTunnelSession session, SerialPortSettings settings)
+{
+    var method = typeof(Com0comServiceTunnelSession).GetMethod(
+        "UpdateSerialSettings",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+        binder: null,
+        types: [typeof(SerialPortSettings)],
+        modifiers: null)
+        ?? throw new Exception("UpdateSerialSettings reflection target missing.");
+    var frame = method.Invoke(session, [settings])
+        ?? throw new Exception("UpdateSerialSettings returned null.");
+    return (byte[])(frame.GetType().GetProperty("Bytes")?.GetValue(frame)
+        ?? throw new Exception("UpdateSerialSettings returned a frame without Bytes."));
+}
+
 static void InvokeCom0comApplyNotification(Com0comServiceTunnelSession session, Rfc2217Notification notification)
 {
     var method = typeof(Com0comServiceTunnelSession).GetMethod(
@@ -2807,6 +3037,24 @@ static bool ContainsSequence(IReadOnlyList<byte> bytes, IReadOnlyList<byte> expe
 
     return false;
 }
+static byte[] Com0comPeerBaudInsertion(uint baudRate)
+{
+    return
+    [
+        0xFF,
+        16,
+        (byte)baudRate,
+        (byte)(baudRate >> 8),
+        (byte)(baudRate >> 16),
+        (byte)(baudRate >> 24)
+    ];
+}
+
+static byte[] Com0comPeerLineInsertion(byte byteSize, byte parity, byte stopBits)
+{
+    return [0xFF, 17, byteSize, parity, stopBits];
+}
+
 static byte[] BuildRfc2217Ack(byte command, byte payload)
 {
     return payload == 0xFF
@@ -2840,6 +3088,23 @@ static byte[] SlipFrame(params byte[] payload)
 }
 
 static byte[] Concat(params byte[][] chunks) => chunks.SelectMany(chunk => chunk).ToArray();
+
+static bool ProcessHasExited(int processId)
+{
+    try
+    {
+        using var process = Process.GetProcessById(processId);
+        return process.HasExited;
+    }
+    catch (ArgumentException)
+    {
+        return true;
+    }
+    catch (InvalidOperationException)
+    {
+        return true;
+    }
+}
 
 static byte[] InvokeKmdfBuildNetworkFrame(KmdfTunnelSession session, ushort type, ushort flags, byte[] payload)
 {
@@ -2906,15 +3171,26 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
     private readonly object _lock = new();
     private readonly List<int> _writeSizes = [];
     private TaskCompletionSource _bytesWritten = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource _readReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Queue<byte[]> _readChunks = [];
     private int _totalBytes;
     private uint _modemStatus;
     private SerialPortSettings _settings = new(115200, 8, 0, 0);
+    private SerialPeerSettingsInsertion _peerSettingsInsertion = SerialPeerSettingsInsertion.Unavailable();
 
     public bool SupportsModemStatusEvents => false;
 
+    public SerialPeerSettingsInsertion EnablePeerSettingsInsertion(byte escapeChar)
+    {
+        lock (_lock)
+        {
+            return _peerSettingsInsertion;
+        }
+    }
+
     public ValueTask<int> ReadAsync(byte[] buffer, CancellationToken cancellationToken)
     {
-        return new ValueTask<int>(WaitForSerialReadAsync(cancellationToken));
+        return new ValueTask<int>(WaitForSerialReadAsync(buffer, cancellationToken));
     }
 
     public ValueTask WriteAsync(byte[] bytes, CancellationToken cancellationToken, Action<SerialPortBackpressureInfo>? backpressure = null)
@@ -2949,6 +3225,23 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
         lock (_lock)
         {
             _settings = settings;
+        }
+    }
+
+    public void SetPeerSettingsInsertion(SerialPeerSettingsInsertion insertion)
+    {
+        lock (_lock)
+        {
+            _peerSettingsInsertion = insertion;
+        }
+    }
+
+    public void EnqueueRead(byte[] bytes)
+    {
+        lock (_lock)
+        {
+            _readChunks.Enqueue(bytes);
+            _readReady.TrySetResult();
         }
     }
 
@@ -3000,10 +3293,35 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
     {
     }
 
-    private static async Task<int> WaitForSerialReadAsync(CancellationToken cancellationToken)
+    private async Task<int> WaitForSerialReadAsync(byte[] buffer, CancellationToken cancellationToken)
     {
-        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-        return 0;
+        while (true)
+        {
+            Task waitTask;
+            lock (_lock)
+            {
+                if (_readChunks.Count > 0)
+                {
+                    var chunk = _readChunks.Dequeue();
+                    if (chunk.Length > buffer.Length)
+                    {
+                        throw new InvalidOperationException("Test serial read chunk is larger than the read buffer.");
+                    }
+
+                    Buffer.BlockCopy(chunk, 0, buffer, 0, chunk.Length);
+                    return chunk.Length;
+                }
+
+                if (_readReady.Task.IsCompleted)
+                {
+                    _readReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+
+                waitTask = _readReady.Task;
+            }
+
+            await waitTask.WaitAsync(cancellationToken);
+        }
     }
 }
 
