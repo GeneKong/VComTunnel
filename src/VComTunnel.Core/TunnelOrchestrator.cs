@@ -507,6 +507,12 @@ public sealed class TunnelOrchestrator
             return mapping;
         }
 
+        if (mapping.Backend != TunnelBackend.Com0comService)
+        {
+            _log.Warn(mapping.Name, "Wireless serial endpoint binding is only supported by the com0comService backend; using the saved endpoint.");
+            return mapping;
+        }
+
         var endpoints = _wirelessSerialEndpoints;
         if (endpoints is null)
         {
@@ -560,6 +566,10 @@ public sealed class TunnelOrchestrator
         {
             _log.Warn("wireless-serial", $"Could not refresh MAC-bound tunnels after endpoint update: {ex.Message}");
         }
+        catch (Exception ex)
+        {
+            _log.Error("wireless-serial", $"Unexpected error refreshing MAC-bound tunnels after endpoint update: {ex.Message}");
+        }
     }
 
     private async Task RestartMappingIfWirelessEndpointChangedAsync(TunnelMapping configuredMapping, CancellationToken cancellationToken)
@@ -599,6 +609,10 @@ public sealed class TunnelOrchestrator
         catch (Exception ex) when (ex is IOException or SocketException or InvalidOperationException or TimeoutException)
         {
             _log.Error(configuredMapping.Name, $"Wireless serial endpoint refresh failed: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            _log.Error(configuredMapping.Name, $"Unexpected wireless serial endpoint refresh failure: {ex.Message}");
         }
         finally
         {
@@ -1061,12 +1075,35 @@ public sealed class TunnelOrchestrator
     }
     private static bool UsesSameEndpoint(TunnelMapping left, TunnelMapping right)
     {
-        return string.Equals(EndpointKey(left), EndpointKey(right), StringComparison.OrdinalIgnoreCase);
+        return string.Equals(NetworkEndpointKey(left), NetworkEndpointKey(right), StringComparison.OrdinalIgnoreCase)
+            || UsesSameWirelessSerialBinding(left, right);
     }
 
     private static string EndpointKey(TunnelMapping mapping)
     {
+        var mac = NormalizedWirelessSerialMac(mapping);
+        return mac is null
+            ? NetworkEndpointKey(mapping)
+            : $"{mapping.Protocol}|wireless|{mac}";
+    }
+
+    private static string NetworkEndpointKey(TunnelMapping mapping)
+    {
         return $"{mapping.Protocol}|{mapping.Host.Trim()}|{mapping.Port}";
+    }
+
+    private static bool UsesSameWirelessSerialBinding(TunnelMapping left, TunnelMapping right)
+    {
+        var leftMac = NormalizedWirelessSerialMac(left);
+        return leftMac is not null
+            && string.Equals(leftMac, NormalizedWirelessSerialMac(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? NormalizedWirelessSerialMac(TunnelMapping mapping)
+    {
+        return mapping.WirelessSerialAutoDiscover
+            ? WirelessSerialEndpointRegistry.NormalizeMac(mapping.WirelessSerialMac)
+            : null;
     }
 
     private static string FormatEndpoint(TunnelMapping mapping)

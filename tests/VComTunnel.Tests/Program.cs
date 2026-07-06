@@ -64,6 +64,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com service start requests are serialized", Com0comServiceStartRequestsAreSerializedAsync),
     ("starting same endpoint stops prior tunnel", StartingSameEndpointStopsPriorTunnelAsync),
     ("autostart restores last running same endpoint mapping", AutoStartRestoresLastRunningSameEndpointMappingAsync),
+    ("autostart separates wireless mappings with same fallback endpoint", AutoStartSeparatesWirelessMappingsWithSameFallbackEndpointAsync),
     ("autostart timeout does not block another mapping", AutoStartTimeoutDoesNotBlockAnotherMappingAsync),
     ("stale starting session completion is ignored", StaleStartingSessionCompletionIsIgnoredAsync),
     ("hub4com to com0com service retries busy backing port", Hub4comToCom0comServiceRetriesBusyBackingPortAsync),
@@ -2270,6 +2271,78 @@ static async Task AutoStartRestoresLastRunningSameEndpointMappingAsync()
     AssertTrue(
         log.Snapshot().Any(e => e.Source == "Tunnel 1" && e.Message.Contains("last mapping that successfully reached Running", StringComparison.OrdinalIgnoreCase)),
         "AutoStart should restore the mapping that last reached Running for the endpoint, not the last configured row.");
+}
+
+static async Task AutoStartSeparatesWirelessMappingsWithSameFallbackEndpointAsync()
+{
+    using var temp = new TempDir();
+    var first = new TunnelMapping
+    {
+        Id = "wireless-1",
+        Name = "Wireless 1",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM81",
+        BackingPort = "CNCB81",
+        Host = "127.0.0.1",
+        Port = 5000,
+        AutoStart = true,
+        WirelessSerialAutoDiscover = true,
+        WirelessSerialMac = "AA:BB:CC:DD:EE:01"
+    };
+    var second = first with
+    {
+        Id = "wireless-2",
+        Name = "Wireless 2",
+        VisiblePort = "COM82",
+        BackingPort = "CNCB82",
+        WirelessSerialMac = "AA:BB:CC:DD:EE:02"
+    };
+    var store = new ConfigStore(Path.Combine(temp.Path, "config.json"));
+    await store.SaveAsync(new VComTunnelConfig { Mappings = [first, second] });
+
+    var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    var registry = new WirelessSerialEndpointRegistry(log, deviceTtl: TimeSpan.FromMinutes(1));
+    registry.Upsert(new WirelessSerialEndpointUpdateRequest(
+        Mac: first.WirelessSerialMac!,
+        IpAddress: "192.168.10.81",
+        ServicePort: 2217,
+        Source: "test"));
+    registry.Upsert(new WirelessSerialEndpointUpdateRequest(
+        Mac: second.WirelessSerialMac!,
+        IpAddress: "192.168.10.82",
+        ServicePort: 2217,
+        Source: "test"));
+
+    var endpoints = new List<string>();
+    var starts = 0;
+    var orchestrator = CreateOrchestratorWithPorts(
+        store,
+        new DependencyDetector([temp.Path], pathOverride: ""),
+        log,
+        ["COM81", "CNCB81", "COM82", "CNCB82"],
+        com0comServiceSessionFactory: (sessionMapping, sessionLog, faulted) =>
+        {
+            Interlocked.Increment(ref starts);
+            lock (endpoints)
+            {
+                endpoints.Add($"{sessionMapping.Id}:{sessionMapping.Host}:{sessionMapping.Port}");
+            }
+
+            return new FakeManagedTunnelSession(faulted, failAfterStart: null);
+        },
+        wirelessSerialEndpoints: registry);
+
+    await orchestrator.StartAutoStartMappingsAsync();
+
+    AssertEqual("2", Volatile.Read(ref starts).ToString());
+    var statuses = orchestrator.GetStatus().Tunnels.ToDictionary(t => t.Id);
+    AssertEqual(TunnelRunState.Running.ToString(), statuses["wireless-1"].State.ToString());
+    AssertEqual(TunnelRunState.Running.ToString(), statuses["wireless-2"].State.ToString());
+    lock (endpoints)
+    {
+        AssertTrue(endpoints.Contains("wireless-1:192.168.10.81:2217"), "First MAC-bound tunnel should use its discovered endpoint.");
+        AssertTrue(endpoints.Contains("wireless-2:192.168.10.82:2217"), "Second MAC-bound tunnel should use its discovered endpoint.");
+    }
 }
 
 static async Task AutoStartTimeoutDoesNotBlockAnotherMappingAsync()
