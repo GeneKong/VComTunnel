@@ -252,6 +252,25 @@ static void WirelessSerialEndpointRegistryUpdatesEndpoint()
         "Expected minimal WirelessSerial UDP endpoint packet to parse.");
     AssertEqual("112233445566", parsed!.Mac);
     AssertEqual("192.168.10.43", parsed.IpAddress);
+
+    var monitorPacket = """
+        {
+          "magic":"XFGWS",
+          "proto":"xfg-discovery",
+          "ver":1,
+          "cmd":"response",
+          "device":{"name":"ESP32-C3-LCD-1.47","mac":"9C:CC:01:D9:30:1C"},
+          "net":{"ip":"10.0.2.127","management_port":9617,"port":5000,"mode":"ttl_monitor","service_mask":8},
+          "features":{"tcp_server":true,"rfc2217":false}
+        }
+        """;
+    AssertTrue(
+        !registry.TryApplyDiscoveryPacket(monitorPacket, new IPEndPoint(IPAddress.Parse("10.0.2.127"), 19527), out var ignored),
+        "TTL Monitor discovery must not be accepted as an RFC2217 endpoint.");
+    AssertTrue(ignored is null, "Ignored non-RFC discovery packets must not update endpoint state.");
+    AssertTrue(
+        registry.FindEndpointByMac("9C:CC:01:D9:30:1C") is null,
+        "VirtualCom MAC binding must only follow advertised RFC2217 endpoints.");
 }
 
 static async Task WirelessSerialPeriodicQueryFollowsMacBindingAsync()

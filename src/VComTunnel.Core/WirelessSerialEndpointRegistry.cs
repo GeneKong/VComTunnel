@@ -12,6 +12,7 @@ public sealed class WirelessSerialEndpointRegistry
     public const int DefaultUdpPort = 19527;
     public const string Magic = "XFGWS";
     public const string Protocol = "xfg-discovery";
+    private const int Rfc2217ServiceMask = 1 << 0;
 
     private static readonly TimeSpan DefaultDeviceTtl = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DefaultQueryInterval = TimeSpan.FromSeconds(60);
@@ -252,6 +253,12 @@ public sealed class WirelessSerialEndpointRegistry
                 ip = remoteEndpoint.Address.ToString();
             }
 
+            var mode = GetString(netObject, "mode");
+            if (!PacketAdvertisesRfc2217(root, netObject, mode))
+            {
+                return false;
+            }
+
             var port = GetInt(netObject, "port");
             if (port is < 1 or > 65535)
             {
@@ -267,7 +274,7 @@ public sealed class WirelessSerialEndpointRegistry
                 Product: GetString(deviceObject, "product"),
                 Board: GetString(deviceObject, "board"),
                 Firmware: GetString(deviceObject, "firmware"),
-                Mode: GetString(netObject, "mode"),
+                Mode: mode,
                 Source: "udp"));
             return true;
         }
@@ -629,6 +636,49 @@ public sealed class WirelessSerialEndpointRegistry
             && value.TryGetInt32(out var result)
             ? result
             : null;
+    }
+
+    private static bool PacketAdvertisesRfc2217(JsonElement root, JsonElement netObject, string? mode)
+    {
+        // net.port is an active device service port; VCom may bind only when
+        // the discovery packet identifies that endpoint as RFC2217.
+        if (root.TryGetProperty("features", out var features)
+            && TryGetBool(features, "rfc2217", out var rfc2217))
+        {
+            return rfc2217;
+        }
+
+        var serviceMask = GetInt(netObject, "service_mask");
+        if (serviceMask.HasValue)
+        {
+            return (serviceMask.Value & Rfc2217ServiceMask) != 0;
+        }
+
+        return string.Equals(mode, "rfc2217", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryGetBool(JsonElement element, string propertyName, out bool value)
+    {
+        value = false;
+        if (element.ValueKind != JsonValueKind.Object
+            || !element.TryGetProperty(propertyName, out var property))
+        {
+            return false;
+        }
+
+        if (property.ValueKind == JsonValueKind.True)
+        {
+            value = true;
+            return true;
+        }
+
+        if (property.ValueKind == JsonValueKind.False)
+        {
+            value = false;
+            return true;
+        }
+
+        return false;
     }
 
     private static string? EmptyToNull(string? value)
