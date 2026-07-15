@@ -471,19 +471,23 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         bool? dtr = previousDtr != currentDtr ? currentDtr : null;
         bool? rts = previousRts != currentRts ? currentRts : null;
         var modemChanged = dtr is not null || rts is not null;
-        var missedDtrPulse = !modemChanged && (eventMask & SerialPortSnapshot.EventDsr) != 0 && previousDtr == currentDtr;
-        var missedRtsPulse = !modemChanged && (eventMask & SerialPortSnapshot.EventCts) != 0 && previousRts == currentRts;
+
+        // WaitCommEvent only says that a modem input changed before the current
+        // snapshot was sampled. If the level is unchanged, the event may be a
+        // delayed notification for an edge already forwarded with another
+        // line, or it may represent an entire pulse. There is no edge history
+        // here to distinguish the two cases, so synthesizing a pulse is unsafe:
+        // it can inject an extra target reset into an esptool download sequence.
+        // Forward only levels that were actually observed.
 
         if (!forwardControlLines)
         {
-            if (modemChanged || missedDtrPulse || missedRtsPulse)
+            if (modemChanged)
             {
-                bool? suppressedDtr = modemChanged ? dtr : missedDtrPulse ? !currentDtr : null;
-                bool? suppressedRts = modemChanged ? rts : missedRtsPulse ? !currentRts : null;
                 return new Rfc2217OutboundFrame(
                     [],
                     [],
-                    $"Suppressed modem-control because control-line forwarding is disabled raw=0x{previous.ModemStatus:X8}->0x{current.ModemStatus:X8}, event=0x{eventMask:X8}, dtr={FormatNullableBool(suppressedDtr)}, rts={FormatNullableBool(suppressedRts)}.",
+                    $"Suppressed modem-control because control-line forwarding is disabled raw=0x{previous.ModemStatus:X8}->0x{current.ModemStatus:X8}, event=0x{eventMask:X8}, dtr={FormatNullableBool(dtr)}, rts={FormatNullableBool(rts)}.",
                     LogWhenEmpty: true);
             }
 
@@ -494,17 +498,6 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         {
             frames.Add(Rfc2217Client.BuildSetModemControl(dtr, rts));
             descriptions.Add($"TX modem-control raw=0x{previous.ModemStatus:X8}->0x{current.ModemStatus:X8}, dtr={FormatNullableBool(dtr)}, rts={FormatNullableBool(rts)}");
-        }
-        else if (missedDtrPulse || missedRtsPulse)
-        {
-            var pulseDtr = missedDtrPulse ? !currentDtr : (bool?)null;
-            var pulseRts = missedRtsPulse ? !currentRts : (bool?)null;
-            var restoreDtr = missedDtrPulse ? currentDtr : (bool?)null;
-            var restoreRts = missedRtsPulse ? currentRts : (bool?)null;
-            frames.Add(Rfc2217Client.BuildSetModemControl(pulseDtr, pulseRts));
-            frames.Add(Rfc2217Client.BuildSetModemControl(restoreDtr, restoreRts));
-            descriptions.Add($"TX modem-control synthesized-pulse raw=0x{current.ModemStatus:X8}, event=0x{eventMask:X8}, dtr={FormatNullableBool(pulseDtr)}, rts={FormatNullableBool(pulseRts)}");
-            descriptions.Add($"TX modem-control synthesized-restore raw=0x{current.ModemStatus:X8}, event=0x{eventMask:X8}, dtr={FormatNullableBool(restoreDtr)}, rts={FormatNullableBool(restoreRts)}");
         }
 
         return BuildFrame(frames, descriptions);
@@ -1449,6 +1442,7 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
     private const uint EventCts = 0x00000008;
     private const uint EventDsr = 0x00000010;
     private const uint DcbBinary = 0x00000001;
+    private const uint DcbParity = 0x00000002;
     private const uint DcbOutxCtsFlow = 0x00000004;
     private const uint DcbOutxDsrFlow = 0x00000008;
     private const uint DcbDsrSensitivity = 0x00000040;
@@ -1515,11 +1509,11 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
             throw new SerialPortOpenException(portName, path, error, "configure serial port timeouts for");
         }
 
-        if (!ConfigureLowLatencyLocalHandflow(handle))
+        if (!ConfigureBinaryBackingTransport(handle))
         {
             var error = Marshal.GetLastWin32Error();
             handle.Dispose();
-            throw new SerialPortOpenException(portName, path, error, "configure local serial handflow for");
+            throw new SerialPortOpenException(portName, path, error, "configure binary backing transport for");
         }
 
         var supportsModemStatusEvents = SetCommMask(handle, EventCts | EventDsr);
@@ -1530,7 +1524,7 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         ? portName
         : $@"\\.\{portName}";
 
-    private static bool ConfigureLowLatencyLocalHandflow(SafeFileHandle handle)
+    private static bool ConfigureBinaryBackingTransport(SafeFileHandle handle)
     {
         var dcb = new Dcb { DCBlength = (uint)Marshal.SizeOf<Dcb>() };
         if (!GetCommState(handle, ref dcb))
@@ -1539,19 +1533,36 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         }
 
         dcb.Flags = NormalizeLocalSerialFlags(dcb.Flags);
+        var transportSettings = NormalizeBackingTransportDataFormat(
+            new SerialPortSettings(dcb.BaudRate, dcb.ByteSize, dcb.Parity, dcb.StopBits));
+        dcb.ByteSize = transportSettings.ByteSize;
+        dcb.Parity = transportSettings.Parity;
+        dcb.StopBits = transportSettings.StopBits;
         return SetCommState(handle, ref dcb);
     }
 
     private static uint NormalizeLocalSerialFlags(uint flags)
     {
         flags |= DcbBinary;
-        flags &= ~(DcbOutxCtsFlow
+        flags &= ~(DcbParity
+            | DcbOutxCtsFlow
             | DcbOutxDsrFlow
             | DcbDsrSensitivity
             | DcbOutX
             | DcbInX
             | DcbAbortOnError);
         return flags;
+    }
+
+    private static SerialPortSettings NormalizeBackingTransportDataFormat(SerialPortSettings settings)
+    {
+        // CNCB is a byte transport carrying payload plus out-of-band RFC2217
+        // settings, not the physical UART itself. Leaving the backing DCB at
+        // com0com's zero/legacy default can make Windows clear bit 7 (C0 -> 40)
+        // before the service ever sees the byte. Keep this internal leg binary
+        // clean; the visible peer's requested data/parity/stop settings are
+        // still observed through com0com insertion events and sent remotely.
+        return settings with { ByteSize = 8, Parity = 0, StopBits = 0 };
     }
 
     public bool SupportsModemStatusEvents => _supportsModemStatusEvents;
@@ -1969,6 +1980,7 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         public sbyte XoffChar;
         public sbyte ErrorChar;
         public sbyte EofChar;
+        public sbyte EvtChar;
         public ushort WReserved1;
     }
 

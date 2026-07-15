@@ -5,9 +5,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="System.ServiceProcess.ServiceController">
-      <HintPath>C:\Program Files\dotnet\sdk\8.0.422\runtimes\win\lib\net8.0\System.ServiceProcess.ServiceController.dll</HintPath>
-    </Reference>
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" />
   </ItemGroup>
 
   <PropertyGroup>

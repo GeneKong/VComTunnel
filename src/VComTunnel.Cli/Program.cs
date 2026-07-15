@@ -216,7 +216,7 @@ internal static class VComTunnelCtl
                     var endpoint = device.ServicePort is null
                         ? device.IpAddress
                         : $"{device.IpAddress}:{device.ServicePort}";
-                    var name = FirstNonEmpty(device.DeviceId, device.Name, device.Product, device.Board) ?? "-";
+                    var name = FirstNonEmpty(device.Alias, device.DeviceId, device.Name, device.Product, device.Board) ?? "-";
                     var rssi = device.WifiRssi?.ToString() ?? "-";
                     var mode = device.Mode ?? "-";
                     Console.WriteLine($"{device.Mac,-17} {endpoint,-22} {rssi,5} {mode,-10} {name,-18} {device.LastSeenAt:O}");

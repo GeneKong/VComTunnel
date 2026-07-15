@@ -156,6 +156,7 @@ public sealed record SetupcCommandRunResult(
 public sealed record WirelessSerialDeviceEndpoint(
     string Mac,
     string? DeviceId,
+    string? Alias,
     string? Name,
     string? Product,
     string? Board,
@@ -180,6 +181,7 @@ public sealed record WirelessSerialEndpointUpdateRequest(
     string IpAddress,
     int? ServicePort = null,
     string? DeviceId = null,
+    string? Alias = null,
     string? Name = null,
     string? Product = null,
     string? Board = null,

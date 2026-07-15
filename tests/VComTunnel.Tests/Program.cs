@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 
 var tests = new List<(string Name, Func<Task> Test)>
 {
@@ -14,6 +15,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("invalid host and port are rejected", () => Task.Run(InvalidHostAndPortAreRejected)),
     ("wireless serial auto discovery validation", () => Task.Run(WirelessSerialAutoDiscoveryValidation)),
     ("wireless serial endpoint registry", () => Task.Run(WirelessSerialEndpointRegistryUpdatesEndpoint)),
+    ("wireless serial endpoint alias API contract", () => Task.Run(WirelessSerialEndpointAliasApiContract)),
     ("wireless serial periodic query follows MAC binding", WirelessSerialPeriodicQueryFollowsMacBindingAsync),
     ("wireless serial endpoint change restarts running mapping", WirelessSerialEndpointChangeRestartsRunningMappingAsync),
     ("wireless serial MAC binding corrects wrong saved endpoint on start", WirelessSerialMacBindingCorrectsWrongSavedEndpointOnStartAsync),
@@ -26,7 +28,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("file logs rotate and cap archives", () => Task.Run(FileLogsRotateAndCapArchives)),
     ("com0com create hints", () => Task.Run(Com0comCreateHints)),
     ("com0com service maps peer modem signals", () => Task.Run(Com0comServiceMapsPeerModemSignals)),
-    ("com0com service reconstructs fast RTS pulse", () => Task.Run(Com0comServiceReconstructsFastRtsPulse)),
+    ("com0com service does not synthesize unobserved RTS pulse", () => Task.Run(Com0comServiceDoesNotSynthesizeUnobservedRtsPulse)),
     ("com0com service control-line switch blocks forwarding", () => Task.Run(Com0comServiceControlLineSwitchBlocksForwarding)),
     ("com0com service runtime control-line update blocks forwarding", () => Task.Run(Com0comServiceRuntimeControlLineUpdateBlocksForwarding)),
     ("com0com service remote serial settings do not overwrite local settings", () => Task.Run(Com0comServiceRemoteSerialSettingsDoNotOverwriteLocalSettings)),
@@ -40,7 +42,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("faulted mapping restart option hot update schedules restart", FaultedMappingRestartOptionHotUpdateSchedulesRestartAsync),
     ("com0com service RX pipeline writes small chunks", Com0comServiceRxPipelineWritesSmallChunksAsync),
     ("com0com service modem polling forwards RTS", Com0comServiceModemPollingForwardsRtsAsync),
-    ("com0com service local handflow disables blocking flags", () => Task.Run(Com0comServiceLocalHandflowDisablesBlockingFlags)),
+    ("com0com service backing transport is binary clean", () => Task.Run(Com0comServiceBackingTransportIsBinaryClean)),
     ("com0com service builds Win32 device paths", () => Task.Run(Com0comServiceBuildsWin32DevicePaths)),
     ("serial RX backpressure info reports remaining bytes", () => Task.Run(SerialRxBackpressureInfoReportsRemainingBytes)),
     ("esptool baud monitor waits for response", () => Task.Run(EspToolBaudMonitorWaitsForResponse)),
@@ -229,6 +231,7 @@ static void WirelessSerialEndpointRegistryUpdatesEndpoint()
         IpAddress: "192.168.10.42",
         ServicePort: 2217,
         DeviceId: "unit-01",
+        Alias: "东侧机柜",
         Name: "XFG-N01",
         Product: "Wireless Serial",
         Board: "esp32c3",
@@ -243,6 +246,7 @@ static void WirelessSerialEndpointRegistryUpdatesEndpoint()
     AssertEqual("192.168.10.42", device.IpAddress);
     AssertEqual("2217", device.ServicePort?.ToString() ?? "");
     AssertEqual("-58", device.WifiRssi?.ToString() ?? "");
+    AssertEqual("东侧机柜", device.Alias ?? "");
 
     var endpoint = registry.FindEndpointByMac("AA-BB-CC-DD-EE-FF");
     AssertEqual("192.168.10.42", endpoint!.Host);
@@ -254,7 +258,7 @@ static void WirelessSerialEndpointRegistryUpdatesEndpoint()
           "proto":"xfg-discovery",
           "ver":1,
           "cmd":"announce",
-          "device":{"name":"XFG-N02","id":"unit-02","mac":"11:22:33:44:55:66"},
+          "device":{"name":"XFG-N02","id":"unit-02","alias":"西侧机柜","mac":"11:22:33:44:55:66"},
           "net":{"ip":"192.168.10.43","port":5000,"mode":"rfc2217"}
         }
         """;
@@ -263,6 +267,7 @@ static void WirelessSerialEndpointRegistryUpdatesEndpoint()
         "Expected minimal WirelessSerial UDP endpoint packet to parse.");
     AssertEqual("112233445566", parsed!.Mac);
     AssertEqual("192.168.10.43", parsed.IpAddress);
+    AssertEqual("西侧机柜", parsed.Alias ?? "");
 
     var monitorPacket = """
         {
@@ -282,6 +287,28 @@ static void WirelessSerialEndpointRegistryUpdatesEndpoint()
     AssertTrue(
         registry.FindEndpointByMac("9C:CC:01:D9:30:1C") is null,
         "VirtualCom MAC binding must only follow advertised RFC2217 endpoints.");
+}
+
+static void WirelessSerialEndpointAliasApiContract()
+{
+    var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+    var request = JsonSerializer.Deserialize<WirelessSerialEndpointUpdateRequest>(
+        """
+        {
+          "mac":"AA:BB:CC:DD:EE:FF",
+          "ipAddress":"192.168.10.42",
+          "servicePort":2217,
+          "alias":"东侧机柜"
+        }
+        """,
+        options) ?? throw new InvalidOperationException("Expected endpoint update request to deserialize.");
+    var registry = new WirelessSerialEndpointRegistry(new InMemoryLog());
+    var endpoint = registry.Upsert(request);
+    var response = JsonSerializer.Serialize(endpoint, options);
+    using var document = JsonDocument.Parse(response);
+
+    AssertEqual("东侧机柜", request.Alias ?? "");
+    AssertEqual("东侧机柜", document.RootElement.GetProperty("alias").GetString() ?? "");
 }
 
 static async Task WirelessSerialPeriodicQueryFollowsMacBindingAsync()
@@ -406,6 +433,7 @@ static async Task WirelessSerialEndpointChangeRestartsRunningMappingAsync()
         Mac: "AA-BB-CC-DD-EE-FF",
         IpAddress: "192.168.10.43",
         ServicePort: 33221,
+        Alias: "东侧机柜",
         Source: "test"));
 
     await WaitUntilAsync(
@@ -424,6 +452,7 @@ static async Task WirelessSerialEndpointChangeRestartsRunningMappingAsync()
         Mac: "AA-BB-CC-DD-EE-FF",
         IpAddress: "192.168.10.43",
         ServicePort: 33221,
+        Alias: "西侧机柜",
         Source: "test"));
     await Task.Delay(150);
     AssertEqual("2", Volatile.Read(ref starts).ToString());
@@ -647,12 +676,10 @@ static void Com0comServiceMapsPeerModemSignals()
         "Backing CTS should map to visible-side RTS on.");
 }
 
-static void Com0comServiceReconstructsFastRtsPulse()
+static void Com0comServiceDoesNotSynthesizeUnobservedRtsPulse()
 {
     AssertBytes(
-        Concat(
-            Rfc2217Client.BuildSetModemControl(null, true),
-            Rfc2217Client.BuildSetModemControl(null, false)),
+        [],
         Com0comServiceTunnelSession.BuildCom0comPeerModemControlFrames(0, 0, SerialPortSnapshot.EventCts));
 
     AssertBytes(
@@ -1304,9 +1331,10 @@ static async Task Com0comServiceModemPollingForwardsRtsAsync()
         }
     }
 }
-static void Com0comServiceLocalHandflowDisablesBlockingFlags()
+static void Com0comServiceBackingTransportIsBinaryClean()
 {
     const uint binary = 0x00000001;
+    const uint parityEnabled = 0x00000002;
     const uint outxCtsFlow = 0x00000004;
     const uint outxDsrFlow = 0x00000008;
     const uint dtrControlMask = 0x00000030;
@@ -1315,7 +1343,8 @@ static void Com0comServiceLocalHandflowDisablesBlockingFlags()
     const uint inX = 0x00000200;
     const uint rtsControlMask = 0x00003000;
     const uint abortOnError = 0x00004000;
-    var original = outxCtsFlow
+    var original = parityEnabled
+        | outxCtsFlow
         | outxDsrFlow
         | dtrControlMask
         | dsrSensitivity
@@ -1327,9 +1356,15 @@ static void Com0comServiceLocalHandflowDisablesBlockingFlags()
     var normalized = InvokeNormalizeLocalSerialFlags(original);
 
     AssertTrue((normalized & binary) != 0, "Local serial handles should stay in binary mode.");
-    AssertEqual("0", (normalized & (outxCtsFlow | outxDsrFlow | dsrSensitivity | outX | inX | abortOnError)).ToString());
+    AssertEqual("0", (normalized & (parityEnabled | outxCtsFlow | outxDsrFlow | dsrSensitivity | outX | inX | abortOnError)).ToString());
     AssertEqual((original & dtrControlMask).ToString(), (normalized & dtrControlMask).ToString());
     AssertEqual((original & rtsControlMask).ToString(), (normalized & rtsControlMask).ToString());
+
+    var transport = InvokeNormalizeBackingTransportDataFormat(new SerialPortSettings(1200, 7, 2, 0));
+    AssertEqual("1200", transport.BaudRate.ToString());
+    AssertEqual("8", transport.ByteSize.ToString());
+    AssertEqual("0", transport.Parity.ToString());
+    AssertEqual("0", transport.StopBits.ToString());
 }
 static void Com0comServiceBuildsWin32DevicePaths()
 {
@@ -3409,6 +3444,17 @@ static uint InvokeNormalizeLocalSerialFlags(uint flags)
         System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
         ?? throw new Exception("NormalizeLocalSerialFlags reflection target missing.");
     return (uint)(method.Invoke(null, [flags]) ?? throw new Exception("NormalizeLocalSerialFlags returned null."));
+}
+static SerialPortSettings InvokeNormalizeBackingTransportDataFormat(SerialPortSettings settings)
+{
+    var endpointType = typeof(Com0comServiceTunnelSession).Assembly.GetType("VComTunnel.Core.Win32SerialPortEndpoint")
+        ?? throw new Exception("Win32SerialPortEndpoint reflection target missing.");
+    var method = endpointType.GetMethod(
+        "NormalizeBackingTransportDataFormat",
+        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
+        ?? throw new Exception("NormalizeBackingTransportDataFormat reflection target missing.");
+    return (SerialPortSettings)(method.Invoke(null, [settings])
+        ?? throw new Exception("NormalizeBackingTransportDataFormat returned null."));
 }
 static string InvokeBuildDevicePath(string portName)
 {

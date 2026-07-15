@@ -37,6 +37,13 @@ Current scope:
   overlapped `WaitCommEvent` and maps the com0com peer state to RFC2217
   DTR/RTS changes, matching the `hub4com` `pinmap` direction for explicit
   control-line forwarding.
+- Configures the service-owned backing `CNCB` handle as an 8-bit binary byte
+  transport. com0com ports can retain a legacy `7E1` DCB from their default or
+  previous opener; inheriting that DCB clears payload bit 7 before the service
+  can forward the byte (`0xC0` becomes `0x40`). This internal DCB does not
+  override the application's serial format: visible-side baud/data/parity/stop
+  changes are received through com0com insertion events and forwarded as
+  RFC2217 settings to the remote physical UART.
 - Writes RFC2217 RX data to the local COM side through a bounded small-chunk
   pipeline so the TCP reader is not blocked by normal local COM write latency.
 - Removes stale runtime entries when a saved mapping is deleted, so `/api/status`

@@ -90,6 +90,7 @@ public sealed class WirelessSerialEndpointRegistry
         var endpoint = new WirelessSerialDeviceEndpoint(
             mac,
             EmptyToNull(request.DeviceId),
+            EmptyToNull(request.Alias),
             EmptyToNull(request.Name),
             EmptyToNull(request.Product),
             EmptyToNull(request.Board),
@@ -270,6 +271,7 @@ public sealed class WirelessSerialEndpointRegistry
                 ip,
                 port,
                 DeviceId: GetString(deviceObject, "id"),
+                Alias: GetString(deviceObject, "alias"),
                 Name: GetString(deviceObject, "name"),
                 Product: GetString(deviceObject, "product"),
                 Board: GetString(deviceObject, "board"),
