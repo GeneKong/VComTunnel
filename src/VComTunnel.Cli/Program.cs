@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -438,7 +439,7 @@ internal static class VComTunnelCtl
         return action switch
         {
             "install" => await InstallDepsAsync(args),
-            "launch-com0com" => LaunchCom0comInstaller(),
+            "launch-com0com" => await LaunchCom0comInstallerAsync(args),
             _ => DepsHelp()
         };
     }
@@ -466,17 +467,68 @@ internal static class VComTunnelCtl
         return result.Steps.All(s => s.Success) ? 0 : 2;
     }
 
-    private static int LaunchCom0comInstaller()
+    private static async Task<int> LaunchCom0comInstallerAsync(string[] args)
     {
         var installer = new DependencyInstaller(new DependencyDetector());
-        if (installer.LaunchCom0comInstaller(out var message))
+        if (!args.Contains("--wait", StringComparer.OrdinalIgnoreCase))
         {
-            Console.WriteLine(message);
-            return 0;
+            if (installer.LaunchCom0comInstaller(out var launchMessage))
+            {
+                Console.WriteLine(launchMessage);
+                return 0;
+            }
+
+            Console.WriteLine(launchMessage);
+            return 2;
         }
 
-        Console.WriteLine(message);
-        return 2;
+        var installerPath = installer.FindCom0comInstaller();
+        if (installerPath is null)
+        {
+            Console.WriteLine("com0com installer was not found. Run dependency install first.");
+            return 2;
+        }
+
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = installerPath,
+                UseShellExecute = true,
+                Verb = "runas"
+            });
+            if (process is null)
+            {
+                Console.WriteLine("com0com installer could not be started.");
+                return 2;
+            }
+
+            Console.WriteLine($"Waiting for com0com installer: {installerPath}");
+            await process.WaitForExitAsync();
+            if (process.ExitCode == 0)
+            {
+                Console.WriteLine("com0com installation completed.");
+                return 0;
+            }
+            if (process.ExitCode == 1)
+            {
+                Console.WriteLine("com0com installation was canceled.");
+                return 1;
+            }
+
+            Console.WriteLine($"com0com installer failed with exit code {process.ExitCode}.");
+            return 2;
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            Console.WriteLine("com0com installation was canceled.");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"com0com installer could not be started: {ex.Message}");
+            return 2;
+        }
     }
 
     private static int Service(string[] args)
@@ -616,7 +668,8 @@ internal static class VComTunnelCtl
           stop <mappingId>         Stop one configured mapping
           logs                     Read /api/logs from the local service
           deps install [--force] [--no-hub4com] [--no-com0com]
-          deps launch-com0com      Launch downloaded com0com installer with UAC
+          deps launch-com0com [--wait]
+                                  Launch downloaded com0com installer with UAC; optionally wait for completion
           service install [serviceExe] | uninstall | start | stop
         """);
         return 0;
@@ -624,7 +677,7 @@ internal static class VComTunnelCtl
 
     private static int DepsHelp()
     {
-        Console.WriteLine("Usage: vcomtunnelctl deps install [--force] [--no-hub4com] [--no-com0com] | launch-com0com");
+        Console.WriteLine("Usage: vcomtunnelctl deps install [--force] [--no-hub4com] [--no-com0com] | launch-com0com [--wait]");
         return 0;
     }
 
