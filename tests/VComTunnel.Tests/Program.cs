@@ -35,6 +35,7 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("com0com service startup syncs serial settings without control-line replay", Com0comServiceStartupSyncsSerialSettingsWithoutControlLineReplayAsync),
     ("com0com service startup uses peer serial setting insertions", Com0comServiceStartupUsesPeerSerialSettingInsertionsAsync),
     ("com0com service forwards peer serial setting insertions", Com0comServiceForwardsPeerSerialSettingInsertionsAsync),
+    ("com0com service synchronizes modem state before serial data", Com0comServiceSynchronizesModemStateBeforeSerialDataAsync),
     ("running mapping options hot update on save", RunningMappingOptionsHotUpdateOnSaveAsync),
     ("running backend change stops old process on save", RunningBackendChangeStopsOldProcessOnSaveAsync),
     ("deleted mapping stops and removes runtime on save", DeletedMappingStopsAndRemovesRuntimeOnSaveAsync),
@@ -1001,6 +1002,79 @@ static async Task Com0comServiceForwardsPeerSerialSettingInsertionsAsync()
         var messages = string.Join("\n", log.Snapshot().Select(entry => entry.Message));
         AssertStringContains(messages, "com0com peer serial setting baud=230400");
         AssertStringContains(messages, "line data=7, parity=2, stop=2");
+    }
+    finally
+    {
+        session.Dispose();
+        await cts.CancelAsync();
+        listener.Stop();
+        try
+        {
+            await serverTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+}
+
+static async Task Com0comServiceSynchronizesModemStateBeforeSerialDataAsync()
+{
+    using var temp = new TempDir();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    var serverReady = new TaskCompletionSource<NetworkStream>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var serverTask = Task.Run(async () =>
+    {
+        using var client = await listener.AcceptTcpClientAsync(cts.Token);
+        TunnelTcpOptions.ConfigureLowLatency(client);
+        var stream = client.GetStream();
+        var buffer = new byte[4096];
+        _ = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cts.Token);
+        await stream.WriteAsync(Concat(
+            BuildRfc2217Ack(Rfc2217Client.AckSetLineStateMask, 0xFF),
+            BuildRfc2217Ack(Rfc2217Client.AckSetModemStateMask, 0xFF)), cts.Token);
+        serverReady.TrySetResult(stream);
+        await Task.Delay(Timeout.InfiniteTimeSpan, cts.Token);
+    }, cts.Token);
+
+    var serial = new RecordingSerialPortEndpoint();
+    serial.SetSupportsModemStatusEvents(true);
+    serial.SetPeerSettingsInsertion(new SerialPeerSettingsInsertion(true, []));
+    using var log = new InMemoryLog(Path.Combine(temp.Path, "logs"));
+    using var session = new Com0comServiceTunnelSession(
+        new TunnelMapping
+        {
+            Name = "Modem before data",
+            Backend = TunnelBackend.Com0comService,
+            VisiblePort = "COM94",
+            BackingPort = "CNCB94",
+            Host = IPAddress.Loopback.ToString(),
+            Port = port,
+            Hub4comForwardControlLines = true
+        },
+        log,
+        (_, _) => { },
+        new RecordingSerialPortEndpointFactory(serial));
+
+    try
+    {
+        await session.StartAsync(cts.Token);
+        var stream = await serverReady.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+        var serialPayload = new byte[] { 0x07, 0x07, 0x12, 0x20 };
+        serial.SetModemStatus(SerialPortSnapshot.Cts);
+        serial.EnqueueRead(serialPayload);
+
+        await WaitForStreamBytesAsync(
+            stream,
+            Concat(Rfc2217Client.BuildSetModemControl(null, true), serialPayload),
+            TimeSpan.FromSeconds(2));
+
+        AssertStringContains(
+            string.Join("\n", log.Snapshot().Select(entry => entry.Message)),
+            "synchronized before serial data");
     }
     finally
     {
@@ -3699,8 +3773,9 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
     private uint _modemStatus;
     private SerialPortSettings _settings = new(115200, 8, 0, 0);
     private SerialPeerSettingsInsertion _peerSettingsInsertion = SerialPeerSettingsInsertion.Unavailable();
+    private bool _supportsModemStatusEvents;
 
-    public bool SupportsModemStatusEvents => false;
+    public bool SupportsModemStatusEvents => _supportsModemStatusEvents;
 
     public SerialPeerSettingsInsertion EnablePeerSettingsInsertion(byte escapeChar)
     {
@@ -3757,6 +3832,8 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
             _peerSettingsInsertion = insertion;
         }
     }
+
+    public void SetSupportsModemStatusEvents(bool enabled) => _supportsModemStatusEvents = enabled;
 
     public void EnqueueRead(byte[] bytes)
     {

@@ -32,6 +32,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private readonly List<Rfc2217ExpectedAck> _pendingAcks = [];
     private readonly object _flowLock = new();
     private readonly SemaphoreSlim _networkWriteLock = new(1, 1);
+    private readonly SemaphoreSlim _serialOutboundLock = new(1, 1);
     private readonly Channel<SerialRxChunk> _serialRxQueue = Channel.CreateBounded<SerialRxChunk>(new BoundedChannelOptions(SerialRxQueueCapacityChunks)
     {
         SingleReader = true,
@@ -59,7 +60,6 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private Task? _serialRxLoop;
     private Task? _keepAliveLoop;
     private SerialPortSnapshot? _lastSerialSnapshot;
-    private bool _pollModemState;
     private bool _peerSettingsInsertionEnabled;
     private int _disposed;
 
@@ -159,8 +159,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             _lastSerialSnapshot = startupSnapshot;
         }
 
-        _pollModemState = !_serial.SupportsModemStatusEvents;
-        if (_pollModemState)
+        if (!_serial.SupportsModemStatusEvents)
         {
             _log.Warn(_mapping.Name, $"Serial modem-control events are unavailable; falling back to dedicated {SerialModemPollInterval.TotalMilliseconds:0} ms polling for DTR/RTS.");
             _serialModemLoop = Task.Run(SerialModemPollingLoopAsync);
@@ -217,12 +216,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                 {
                     if (inputEvent.PeerSettings is { } settings)
                     {
-                        var frame = UpdateSerialSettings(settings);
-                        if (frame.Bytes.Length > 0)
-                        {
-                            await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
-                            _log.Info(_mapping.Name, frame.Description);
-                        }
+                        await WriteSerialStateFrameAsync(stream, () => UpdateSerialSettings(settings)).ConfigureAwait(false);
 
                         continue;
                     }
@@ -240,13 +234,34 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                     }
 
                     await WaitForRemoteFlowAsync().ConfigureAwait(false);
-                    if (Rfc2217Client.RequiresSerialDataEscaping(serialData, 0, serialData.Length))
+                    await _serialOutboundLock.WaitAsync(_stop.Token).ConfigureAwait(false);
+                    try
                     {
-                        await WriteNetworkAsync(stream, Rfc2217Client.EscapeSerialData(serialData, 0, serialData.Length)).ConfigureAwait(false);
+                        // A visible-COM control IOCTL and its following write can
+                        // wake the modem and data loops at nearly the same time.
+                        // Sample and serialize the current peer state here so an
+                        // esptool synchronization packet cannot overtake DTR/RTS.
+                        var modemFrame = UpdateSerialModemState(
+                            _serial.GetModemStatus(),
+                            SerialPortSnapshot.EventNone);
+                        await WriteSerialStateFrameUnlockedAsync(
+                            stream,
+                            modemFrame.Bytes.Length == 0
+                                ? modemFrame
+                                : modemFrame with { Description = $"{modemFrame.Description} synchronized before serial data" }).ConfigureAwait(false);
+
+                        if (Rfc2217Client.RequiresSerialDataEscaping(serialData, 0, serialData.Length))
+                        {
+                            await WriteNetworkAsync(stream, Rfc2217Client.EscapeSerialData(serialData, 0, serialData.Length)).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await WriteNetworkAsync(stream, serialData).ConfigureAwait(false);
+                        }
                     }
-                    else
+                    finally
                     {
-                        await WriteNetworkAsync(stream, serialData).ConfigureAwait(false);
+                        _serialOutboundLock.Release();
                     }
 
                     LogSerialTx(serialData.Length);
@@ -267,17 +282,9 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             while (!_stop.IsCancellationRequested)
             {
                 var eventMask = _serial!.WaitForModemStatusChange(_stop.Token);
-                var currentModemStatus = _serial.GetModemStatus();
-                var frame = UpdateSerialModemState(currentModemStatus, eventMask);
-                if (frame.Bytes.Length > 0)
-                {
-                    await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
-                    _log.Info(_mapping.Name, frame.Description);
-                }
-                else if (frame.LogWhenEmpty)
-                {
-                    _log.Info(_mapping.Name, frame.Description);
-                }
+                await WriteSerialStateFrameAsync(
+                    stream,
+                    () => UpdateSerialModemState(_serial.GetModemStatus(), eventMask)).ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (!_stop.IsCancellationRequested)
@@ -293,17 +300,11 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             var stream = _tcp!.GetStream();
             while (!_stop.IsCancellationRequested)
             {
-                var currentModemStatus = _serial!.GetModemStatus();
-                var frame = UpdateSerialModemState(currentModemStatus, SerialPortSnapshot.EventNone);
-                if (frame.Bytes.Length > 0)
-                {
-                    await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
-                    _log.Info(_mapping.Name, frame.Description);
-                }
-                else if (frame.LogWhenEmpty)
-                {
-                    _log.Info(_mapping.Name, frame.Description);
-                }
+                await WriteSerialStateFrameAsync(
+                    stream,
+                    () => UpdateSerialModemState(
+                        _serial!.GetModemStatus(),
+                        SerialPortSnapshot.EventNone)).ConfigureAwait(false);
 
                 await Task.Delay(SerialModemPollInterval, _stop.Token).ConfigureAwait(false);
             }
@@ -320,16 +321,9 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
             var stream = _tcp!.GetStream();
             while (!_stop.IsCancellationRequested)
             {
-                var frame = UpdateSerialSettings(_serial!.GetSettings());
-                if (frame.Bytes.Length > 0)
-                {
-                    await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
-                    _log.Info(_mapping.Name, frame.Description);
-                }
-                else if (frame.LogWhenEmpty)
-                {
-                    _log.Info(_mapping.Name, frame.Description);
-                }
+                await WriteSerialStateFrameAsync(
+                    stream,
+                    () => UpdateSerialSettings(_serial!.GetSettings())).ConfigureAwait(false);
 
                 await Task.Delay(SerialSettingsPollInterval, _stop.Token).ConfigureAwait(false);
             }
@@ -337,6 +331,34 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         catch (Exception ex) when (!_stop.IsCancellationRequested)
         {
             Fault(ex);
+        }
+    }
+
+    private async Task WriteSerialStateFrameAsync(
+        NetworkStream stream,
+        Func<Rfc2217OutboundFrame> buildFrame)
+    {
+        await _serialOutboundLock.WaitAsync(_stop.Token).ConfigureAwait(false);
+        try
+        {
+            await WriteSerialStateFrameUnlockedAsync(stream, buildFrame()).ConfigureAwait(false);
+        }
+        finally
+        {
+            _serialOutboundLock.Release();
+        }
+    }
+
+    private async Task WriteSerialStateFrameUnlockedAsync(NetworkStream stream, Rfc2217OutboundFrame frame)
+    {
+        if (frame.Bytes.Length > 0)
+        {
+            await WriteNetworkAsync(stream, frame.Bytes).ConfigureAwait(false);
+            _log.Info(_mapping.Name, frame.Description);
+        }
+        else if (frame.LogWhenEmpty)
+        {
+            _log.Info(_mapping.Name, frame.Description);
         }
     }
 
