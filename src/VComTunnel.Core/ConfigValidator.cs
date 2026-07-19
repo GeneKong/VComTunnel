@@ -13,6 +13,7 @@ public static class ConfigValidator
 
         foreach (var mapping in config.Mappings)
         {
+            var trafficLog = mapping.TrafficLog;
             if (string.IsNullOrWhiteSpace(mapping.Id))
             {
                 errors.Add("Mapping id is required.");
@@ -86,6 +87,58 @@ public static class ConfigValidator
             {
                 errors.Add($"{mapping.Name}: wirelessSerialMac must contain 12 hexadecimal digits.");
             }
+
+            if (trafficLog is null)
+            {
+                errors.Add($"{mapping.Name}: trafficLog must not be null.");
+            }
+            else
+            {
+                if (trafficLog.Enabled && mapping.Backend != TunnelBackend.Com0comService)
+                {
+                    errors.Add($"{mapping.Name}: trafficLog requires the com0comService backend.");
+                }
+
+                if (trafficLog.Enabled && !trafficLog.CaptureRx && !trafficLog.CaptureTx)
+                {
+                    errors.Add($"{mapping.Name}: trafficLog must capture RX, TX, or both.");
+                }
+
+                if (trafficLog.Enabled
+                    && trafficLog.Mode == SerialTrafficLogMode.Exclusive
+                    && (!trafficLog.CaptureRx || trafficLog.CaptureTx))
+                {
+                    errors.Add($"{mapping.Name}: exclusive trafficLog must capture RX only.");
+                }
+
+                if (trafficLog.BaudRate is < 1 or > 4_000_000)
+                {
+                    errors.Add($"{mapping.Name}: trafficLog baudRate must be between 1 and 4000000.");
+                }
+
+                var directoryError = ValidateLogDirectoryPath(trafficLog.DirectoryPath);
+                if (directoryError is not null)
+                {
+                    errors.Add($"{mapping.Name}: trafficLog directoryPath {directoryError}");
+                }
+
+                if (trafficLog.Enabled
+                    && trafficLog.Format == SerialTrafficLogFormat.RawBinary
+                    && trafficLog.IncludeTimestamp)
+                {
+                    errors.Add($"{mapping.Name}: rawBinary trafficLog cannot include timestamps.");
+                }
+
+                if (trafficLog.MaxFileSizeMb is < 1 or > 1024)
+                {
+                    errors.Add($"{mapping.Name}: trafficLog maxFileSizeMb must be between 1 and 1024.");
+                }
+
+                if (trafficLog.MaxFiles is < 1 or > 100)
+                {
+                    errors.Add($"{mapping.Name}: trafficLog maxFiles must be between 1 and 100.");
+                }
+            }
         }
 
         return errors;
@@ -115,6 +168,36 @@ public static class ConfigValidator
                 || port.StartsWith("CNCB", StringComparison.OrdinalIgnoreCase))
             && int.TryParse(port[4..], out var n)
             && n >= 0;
+    }
+
+    private static string? ValidateLogDirectoryPath(string? directoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(directoryPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!Path.IsPathFullyQualified(directoryPath))
+            {
+                return "must be an absolute path.";
+            }
+
+            var fullPath = Path.GetFullPath(directoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var root = Path.GetPathRoot(fullPath)?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (string.IsNullOrWhiteSpace(root)
+                || string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase))
+            {
+                return "must not be a drive or share root.";
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return "is invalid.";
+        }
+
+        return null;
     }
 
     private static bool IsValidHost(string? host)

@@ -28,6 +28,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
     private readonly ISerialPortEndpointFactory _serialPorts;
     private readonly Rfc2217Client _rfc2217 = new();
     private readonly EspToolBaudRateMonitor _espToolBaudRate = new();
+    private readonly SerialTrafficRecorder? _trafficRecorder;
     private readonly object _ackLock = new();
     private readonly List<Rfc2217ExpectedAck> _pendingAcks = [];
     private readonly object _flowLock = new();
@@ -74,6 +75,11 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         _log = log;
         _faulted = faulted;
         _serialPorts = serialPorts ?? new Win32SerialPortEndpointFactory();
+        if (mapping.TrafficLog?.Enabled == true
+            && mapping.TrafficLog.Mode == SerialTrafficLogMode.InUse)
+        {
+            _trafficRecorder = new SerialTrafficRecorder(mapping, mapping.TrafficLog, log);
+        }
         State = TunnelRunState.Starting;
         MarkNetworkActivity();
     }
@@ -191,6 +197,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
         _serialRxQueue.Writer.TryComplete();
         _tcp?.Dispose();
         _serial?.Dispose();
+        _trafficRecorder?.Dispose();
         _stop.Dispose();
     }
 
@@ -265,6 +272,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                     }
 
                     LogSerialTx(serialData.Length);
+                    _trafficRecorder?.Record(SerialTrafficDirection.Tx, serialData);
                 }
             }
         }
@@ -657,6 +665,7 @@ public sealed class Com0comServiceTunnelSession : IManagedTunnelSession
                 {
                     await _serial!.WriteAsync(chunk.Bytes, _stop.Token, LogSerialRxBackpressure).ConfigureAwait(false);
                     LogSerialRx(chunk.Bytes.Length);
+                    _trafficRecorder?.Record(SerialTrafficDirection.Rx, chunk.Bytes);
                 }
                 finally
                 {
@@ -1231,6 +1240,8 @@ public interface ISerialPortEndpoint : IDisposable
     ValueTask WriteAsync(byte[] bytes, CancellationToken cancellationToken, Action<SerialPortBackpressureInfo>? backpressure = null);
     SerialPortSnapshot GetSnapshot();
     SerialPortSettings GetSettings();
+    void SetSettings(SerialPortSettings settings);
+    void SetControlLines(bool? dtr, bool? rts);
     uint GetModemStatus();
     uint WaitForModemStatusChange(CancellationToken cancellationToken);
 }
@@ -1269,7 +1280,7 @@ public sealed record SerialPortBackpressureInfo(int BytesWritten, int TotalBytes
 
 public interface ISerialPortEndpointFactory
 {
-    ISerialPortEndpoint Open(string portName);
+    ISerialPortEndpoint Open(string portName, bool exclusive = false);
 }
 
 public sealed class SerialPortOpenException : IOException
@@ -1443,7 +1454,7 @@ public sealed class EspToolBaudRateMonitor
 
 public sealed class Win32SerialPortEndpointFactory : ISerialPortEndpointFactory
 {
-    public ISerialPortEndpoint Open(string portName) => Win32SerialPortEndpoint.Open(portName);
+    public ISerialPortEndpoint Open(string portName, bool exclusive = false) => Win32SerialPortEndpoint.Open(portName, exclusive);
 }
 
 internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
@@ -1463,13 +1474,19 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
     private const uint C0ceInsertEnableRlc = 0x00000200;
     private const uint EventCts = 0x00000008;
     private const uint EventDsr = 0x00000010;
+    private const uint SetRts = 3;
+    private const uint ClearRts = 4;
+    private const uint SetDtr = 5;
+    private const uint ClearDtr = 6;
     private const uint DcbBinary = 0x00000001;
     private const uint DcbParity = 0x00000002;
     private const uint DcbOutxCtsFlow = 0x00000004;
     private const uint DcbOutxDsrFlow = 0x00000008;
+    private const uint DcbDtrControlMask = 0x00000030;
     private const uint DcbDsrSensitivity = 0x00000040;
     private const uint DcbOutX = 0x00000100;
     private const uint DcbInX = 0x00000200;
+    private const uint DcbRtsControlMask = 0x00003000;
     private const uint DcbAbortOnError = 0x00004000;
     private const uint SerialReadFirstByteTimeoutMs = 2;
     private const uint SerialWriteTimeoutMs = 20;
@@ -1492,7 +1509,7 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         _supportsModemStatusEvents = supportsModemStatusEvents;
     }
 
-    public static Win32SerialPortEndpoint Open(string portName)
+    public static Win32SerialPortEndpoint Open(string portName, bool exclusive = false)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1503,7 +1520,7 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
         var handle = CreateFileW(
             path,
             GenericRead | GenericWrite,
-            FileShareRead | FileShareWrite,
+            exclusive ? 0 : FileShareRead | FileShareWrite,
             IntPtr.Zero,
             OpenExisting,
             FileAttributeNormal | FileFlagOverlapped,
@@ -1665,6 +1682,66 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
             }
 
             return new SerialPortSettings(dcb.BaudRate, dcb.ByteSize, dcb.Parity, dcb.StopBits);
+        }
+    }
+
+    public void SetSettings(SerialPortSettings settings)
+    {
+        lock (_settingsLock)
+        {
+            var dcb = new Dcb { DCBlength = (uint)Marshal.SizeOf<Dcb>() };
+            if (!GetCommState(_handle, ref dcb))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            dcb.Flags = NormalizeLocalSerialFlags(dcb.Flags);
+            dcb.BaudRate = settings.BaudRate;
+            dcb.ByteSize = settings.ByteSize;
+            dcb.Parity = settings.Parity;
+            dcb.StopBits = settings.StopBits;
+            if (!SetCommState(_handle, ref dcb))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        }
+    }
+
+    public void SetControlLines(bool? dtr, bool? rts)
+    {
+        lock (_settingsLock)
+        {
+            if (dtr.HasValue || rts.HasValue)
+            {
+                var dcb = new Dcb { DCBlength = (uint)Marshal.SizeOf<Dcb>() };
+                if (!GetCommState(_handle, ref dcb))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+
+                if (dtr.HasValue)
+                {
+                    dcb.Flags &= ~DcbDtrControlMask;
+                }
+                if (rts.HasValue)
+                {
+                    dcb.Flags &= ~DcbRtsControlMask;
+                }
+                if (!SetCommState(_handle, ref dcb))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+            }
+
+            if (dtr.HasValue && !EscapeCommFunction(_handle, dtr.Value ? SetDtr : ClearDtr))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            if (rts.HasValue && !EscapeCommFunction(_handle, rts.Value ? SetRts : ClearRts))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
         }
     }
 
@@ -2034,6 +2111,9 @@ internal sealed class Win32SerialPortEndpoint : ISerialPortEndpoint
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetCommState(SafeFileHandle hFile, ref Dcb lpDCB);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool EscapeCommFunction(SafeFileHandle hFile, uint dwFunc);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetCommModemStatus(SafeFileHandle hFile, out uint lpModemStat);

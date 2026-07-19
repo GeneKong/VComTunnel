@@ -14,6 +14,27 @@ public enum TunnelProtocol
     Rfc2217
 }
 
+public enum SerialTrafficLogFormat
+{
+    Hex,
+    EscapedText,
+    Text,
+    RawBinary
+}
+
+public enum SerialTrafficLogMode
+{
+    InUse,
+    Exclusive
+}
+
+public enum SerialControlLinePolicy
+{
+    Keep,
+    Low,
+    High
+}
+
 public enum TunnelRunState
 {
     Stopped,
@@ -56,8 +77,25 @@ public sealed record TunnelMapping
     public bool WirelessSerialAutoDiscover { get; init; }
     public string? WirelessSerialMac { get; init; }
     public string? WirelessSerialDeviceId { get; init; }
+    public SerialTrafficLogOptions TrafficLog { get; init; } = new();
     [JsonIgnore]
     public bool SuppressInitialControlLineSync { get; init; }
+}
+
+public sealed record SerialTrafficLogOptions
+{
+    public bool Enabled { get; init; }
+    public SerialTrafficLogMode Mode { get; init; } = SerialTrafficLogMode.InUse;
+    public bool CaptureRx { get; init; } = true;
+    public bool CaptureTx { get; init; } = true;
+    public SerialTrafficLogFormat Format { get; init; } = SerialTrafficLogFormat.Text;
+    public bool IncludeTimestamp { get; init; }
+    public int BaudRate { get; init; } = 115200;
+    public SerialControlLinePolicy Dtr { get; init; } = SerialControlLinePolicy.Keep;
+    public SerialControlLinePolicy Rts { get; init; } = SerialControlLinePolicy.Keep;
+    public string? DirectoryPath { get; init; }
+    public int MaxFileSizeMb { get; init; } = 10;
+    public int MaxFiles { get; init; } = 20;
 }
 
 public sealed record VComTunnelConfig
@@ -91,6 +129,14 @@ public sealed record ServiceStatus(
     DateTimeOffset StartedAt,
     string ConfigPath,
     IReadOnlyList<TunnelStatus> Tunnels);
+
+public sealed record SerialTrafficLogStatus(
+    string Id,
+    bool Enabled,
+    string ActivePath,
+    SerialTrafficLogMode Mode,
+    bool Running,
+    string? LastError);
 
 public sealed record LogEntry(
     DateTimeOffset Timestamp,

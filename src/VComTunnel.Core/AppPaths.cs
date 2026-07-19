@@ -24,6 +24,7 @@ public static class AppPaths
 
     public static string ConfigPath => Path.Combine(ProgramDataRoot, "config.json");
     public static string LogsDirectory => Path.Combine(ProgramDataRoot, "logs");
+    public static string SerialTrafficLogsDirectory => Path.Combine(LogsDirectory, "serial");
     public static string OperationsDirectory => Path.Combine(ProgramDataRoot, "operations");
     public static string ToolsDirectory => Path.Combine(ProgramDataRoot, "tools");
     public static string DownloadsDirectory => Path.Combine(ProgramDataRoot, "downloads");

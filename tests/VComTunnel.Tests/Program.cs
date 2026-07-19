@@ -21,11 +21,17 @@ var tests = new List<(string Name, Func<Task> Test)>
     ("wireless serial MAC binding corrects wrong saved endpoint on start", WirelessSerialMacBindingCorrectsWrongSavedEndpointOnStartAsync),
     ("COM backing port is accepted", () => Task.Run(ComBackingPortIsAccepted)),
     ("config round trip", ConfigRoundTripAsync),
+    ("serial log directory validation", () => Task.Run(SerialLogDirectoryValidation)),
     ("service endpoint defaults to loopback", () => Task.Run(ServiceEndpointDefaultsToLoopback)),
     ("service endpoint accepts loopback override", () => Task.Run(ServiceEndpointAcceptsLoopbackOverride)),
     ("service endpoint rejects non-loopback override", () => Task.Run(ServiceEndpointRejectsNonLoopbackOverride)),
     ("TCP tunnel options enable low latency", () => Task.Run(TcpTunnelOptionsEnableLowLatency)),
     ("file logs rotate and cap archives", () => Task.Run(FileLogsRotateAndCapArchives)),
+    ("serial traffic logger records selected directions", () => Task.Run(SerialTrafficLoggerRecordsSelectedDirections)),
+    ("serial traffic text logger strips ANSI colors", () => Task.Run(SerialTrafficTextLoggerStripsAnsiColors)),
+    ("serial traffic text logger timestamps lines", () => Task.Run(SerialTrafficTextLoggerTimestampsLines)),
+    ("serial traffic raw logger writes exact bytes", () => Task.Run(SerialTrafficRawLoggerWritesExactBytes)),
+    ("exclusive serial logger runs in background service", ExclusiveSerialLoggerRunsInBackgroundServiceAsync),
     ("com0com create hints", () => Task.Run(Com0comCreateHints)),
     ("com0com service maps peer modem signals", () => Task.Run(Com0comServiceMapsPeerModemSignals)),
     ("com0com service does not synthesize unobserved RTS pulse", () => Task.Run(Com0comServiceDoesNotSynthesizeUnobservedRtsPulse)),
@@ -548,7 +554,22 @@ static async Task ConfigRoundTripAsync()
                 AutoStart = true,
                 WirelessSerialAutoDiscover = true,
                 WirelessSerialMac = "AA:BB:CC:DD:EE:FF",
-                WirelessSerialDeviceId = "unit-01"
+                WirelessSerialDeviceId = "unit-01",
+                TrafficLog = new SerialTrafficLogOptions
+                {
+                    Enabled = true,
+                    Mode = SerialTrafficLogMode.Exclusive,
+                    CaptureRx = true,
+                    CaptureTx = false,
+                    Format = SerialTrafficLogFormat.EscapedText,
+                    IncludeTimestamp = false,
+                    BaudRate = 230400,
+                    Dtr = SerialControlLinePolicy.High,
+                    Rts = SerialControlLinePolicy.Low,
+                    DirectoryPath = Path.Combine(temp.Path, "serial-logs"),
+                    MaxFileSizeMb = 16,
+                    MaxFiles = 3
+                }
             }
         ]
     };
@@ -562,6 +583,44 @@ static async Task ConfigRoundTripAsync()
     AssertTrue(loaded.Mappings.Single().WirelessSerialAutoDiscover, "Wireless serial auto-discovery should round-trip.");
     AssertEqual("AA:BB:CC:DD:EE:FF", loaded.Mappings.Single().WirelessSerialMac ?? "");
     AssertEqual("unit-01", loaded.Mappings.Single().WirelessSerialDeviceId ?? "");
+    AssertTrue(loaded.Mappings.Single().TrafficLog.Enabled, "Traffic logging should round-trip.");
+    AssertEqual(SerialTrafficLogMode.Exclusive.ToString(), loaded.Mappings.Single().TrafficLog.Mode.ToString());
+    AssertTrue(!loaded.Mappings.Single().TrafficLog.CaptureTx, "Traffic log direction should round-trip.");
+    AssertEqual(SerialTrafficLogFormat.EscapedText.ToString(), loaded.Mappings.Single().TrafficLog.Format.ToString());
+    AssertEqual("230400", loaded.Mappings.Single().TrafficLog.BaudRate.ToString());
+    AssertEqual(SerialControlLinePolicy.High.ToString(), loaded.Mappings.Single().TrafficLog.Dtr.ToString());
+    AssertEqual(SerialControlLinePolicy.Low.ToString(), loaded.Mappings.Single().TrafficLog.Rts.ToString());
+    AssertEqual(Path.Combine(temp.Path, "serial-logs"), loaded.Mappings.Single().TrafficLog.DirectoryPath ?? "");
+    AssertEqual("16", loaded.Mappings.Single().TrafficLog.MaxFileSizeMb.ToString());
+}
+
+static void SerialLogDirectoryValidation()
+{
+    var mapping = new TunnelMapping
+    {
+        Name = "Directory Validation",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM34",
+        BackingPort = "CNCB34",
+        TrafficLog = new SerialTrafficLogOptions
+        {
+            Enabled = true,
+            CaptureRx = true,
+            CaptureTx = false,
+            DirectoryPath = "relative\\logs"
+        }
+    };
+    AssertContains(
+        ConfigValidator.Validate(new VComTunnelConfig { Mappings = [mapping] }),
+        "must be an absolute path");
+
+    var root = Path.GetPathRoot(Path.GetFullPath(Environment.CurrentDirectory))!;
+    AssertContains(
+        ConfigValidator.Validate(new VComTunnelConfig
+        {
+            Mappings = [mapping with { TrafficLog = mapping.TrafficLog with { DirectoryPath = root } }]
+        }),
+        "must not be a drive or share root");
 }
 
 static void ServiceEndpointDefaultsToLoopback()
@@ -652,6 +711,219 @@ static void FileLogsRotateAndCapArchives()
     }
 
     AssertStringContains(File.ReadAllText(active), "entry-59");
+}
+
+static void SerialTrafficLoggerRecordsSelectedDirections()
+{
+    using var temp = new TempDir();
+    using var serviceLog = new InMemoryLog(Path.Combine(temp.Path, "service"));
+    var mapping = new TunnelMapping
+    {
+        Id = "logger-test",
+        Name = "Logger Test",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM30",
+        BackingPort = "CNCB30"
+    };
+    var options = new SerialTrafficLogOptions
+    {
+        Enabled = true,
+        CaptureRx = true,
+        CaptureTx = false,
+        IncludeTimestamp = false,
+        Format = SerialTrafficLogFormat.Hex,
+        MaxFileSizeMb = 1,
+        MaxFiles = 2
+    };
+
+    string activePath;
+    using (var recorder = new SerialTrafficRecorder(mapping, options, serviceLog, temp.Path))
+    {
+        activePath = recorder.ActivePath;
+        recorder.Record(SerialTrafficDirection.Tx, new byte[] { 0x01, 0x02 });
+        recorder.Record(SerialTrafficDirection.Rx, new byte[] { 0x7E, 0xFF });
+        AssertTrue(
+            SpinWait.SpinUntil(
+                () => File.Exists(activePath) && new FileInfo(activePath).Length > 0,
+                TimeSpan.FromSeconds(3)),
+            "Active serial traffic logs should be flushed while the tunnel remains running.");
+    }
+
+    var text = File.ReadAllText(activePath);
+    AssertStringContains(text, "RX 2 7EFF");
+    AssertTrue(!text.Contains("TX", StringComparison.Ordinal), "Disabled TX direction must not be recorded.");
+}
+
+static void SerialTrafficTextLoggerStripsAnsiColors()
+{
+    using var temp = new TempDir();
+    using var serviceLog = new InMemoryLog(Path.Combine(temp.Path, "service"));
+    var mapping = new TunnelMapping
+    {
+        Id = "text-logger-test",
+        Name = "Text Logger Test",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM31",
+        BackingPort = "CNCB31"
+    };
+    var options = new SerialTrafficLogOptions
+    {
+        Enabled = true,
+        CaptureRx = true,
+        CaptureTx = false,
+        IncludeTimestamp = false,
+        Format = SerialTrafficLogFormat.Text,
+        MaxFileSizeMb = 1,
+        MaxFiles = 20
+    };
+
+    string activePath;
+    using (var recorder = new SerialTrafficRecorder(mapping, options, serviceLog, temp.Path))
+    {
+        activePath = recorder.ActivePath;
+        recorder.Record(SerialTrafficDirection.Rx, "\u001b[0;3"u8.ToArray());
+        recorder.Record(SerialTrafficDirection.Rx, "2mOK\u001b[0m\r\n"u8.ToArray());
+    }
+
+    AssertTrue(activePath.EndsWith(".rx.txt", StringComparison.OrdinalIgnoreCase), "TXT RX logs must use .rx.txt.");
+    AssertEqual("OK\r\n", File.ReadAllText(activePath));
+}
+
+static void SerialTrafficTextLoggerTimestampsLines()
+{
+    using var temp = new TempDir();
+    using var serviceLog = new InMemoryLog(Path.Combine(temp.Path, "service"));
+    var mapping = new TunnelMapping
+    {
+        Id = "timestamp-logger-test",
+        Name = "Timestamp Logger Test",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM33",
+        BackingPort = "CNCB33"
+    };
+    var options = new SerialTrafficLogOptions
+    {
+        Enabled = true,
+        CaptureRx = true,
+        CaptureTx = false,
+        IncludeTimestamp = true,
+        Format = SerialTrafficLogFormat.Text,
+        MaxFileSizeMb = 1,
+        MaxFiles = 20
+    };
+
+    string activePath;
+    using (var recorder = new SerialTrafficRecorder(mapping, options, serviceLog, temp.Path))
+    {
+        activePath = recorder.ActivePath;
+        recorder.Record(SerialTrafficDirection.Rx, "first\nsecond"u8.ToArray());
+    }
+
+    var lines = File.ReadAllLines(activePath);
+    AssertEqual("2", lines.Length.ToString());
+    AssertTrue(lines[0].EndsWith(" first", StringComparison.Ordinal), "First TXT line should have a timestamp prefix.");
+    AssertTrue(lines[1].EndsWith(" second", StringComparison.Ordinal), "Second TXT line should have a timestamp prefix.");
+}
+
+static void SerialTrafficRawLoggerWritesExactBytes()
+{
+    using var temp = new TempDir();
+    using var serviceLog = new InMemoryLog(Path.Combine(temp.Path, "service"));
+    var mapping = new TunnelMapping
+    {
+        Id = "raw-logger-test",
+        Name = "Raw Logger Test",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM32",
+        BackingPort = "CNCB32"
+    };
+    var options = new SerialTrafficLogOptions
+    {
+        Enabled = true,
+        CaptureRx = true,
+        CaptureTx = true,
+        IncludeTimestamp = false,
+        Format = SerialTrafficLogFormat.RawBinary,
+        MaxFileSizeMb = 1,
+        MaxFiles = 20
+    };
+    var expectedRx = new byte[] { 0x00, 0x1B, 0xFF, 0x0D, 0x0A };
+    var expectedTx = new byte[] { 0x55, 0xAA, 0x00 };
+    AssertEmpty(ConfigValidator.Validate(new VComTunnelConfig { Mappings = [mapping with { TrafficLog = options }] }));
+    AssertContains(
+        ConfigValidator.Validate(new VComTunnelConfig
+        {
+            Mappings = [mapping with { TrafficLog = options with { IncludeTimestamp = true } }]
+        }),
+        "cannot include timestamps");
+
+    string activePath;
+    using (var recorder = new SerialTrafficRecorder(mapping, options, serviceLog, temp.Path))
+    {
+        activePath = recorder.ActivePath;
+        recorder.Record(SerialTrafficDirection.Rx, expectedRx);
+        recorder.Record(SerialTrafficDirection.Tx, expectedTx);
+    }
+
+    var txPath = activePath.Replace(".rx.bin", ".tx.bin", StringComparison.OrdinalIgnoreCase);
+    AssertTrue(activePath.EndsWith(".rx.bin", StringComparison.OrdinalIgnoreCase), "Raw RX logs must use .rx.bin.");
+    AssertTrue(File.Exists(txPath), "Raw TX logs must use a separate .tx.bin file.");
+    AssertBytes(expectedRx, File.ReadAllBytes(activePath));
+    AssertBytes(expectedTx, File.ReadAllBytes(txPath));
+}
+
+static async Task ExclusiveSerialLoggerRunsInBackgroundServiceAsync()
+{
+    using var temp = new TempDir();
+    using var serviceLog = new InMemoryLog(Path.Combine(temp.Path, "service"));
+    var serial = new RecordingSerialPortEndpoint();
+    var factory = new RecordingSerialPortEndpointFactory(serial);
+    await using var manager = new SerialBackgroundLogManager(
+        factory,
+        serviceLog,
+        null,
+        TimeSpan.FromMilliseconds(10));
+    var mapping = new TunnelMapping
+    {
+        Id = "background-logger-test",
+        Name = "Background Logger Test",
+        Backend = TunnelBackend.Com0comService,
+        VisiblePort = "COM30",
+        BackingPort = "CNCB30",
+        TrafficLog = new SerialTrafficLogOptions
+        {
+            Enabled = true,
+            Mode = SerialTrafficLogMode.Exclusive,
+            CaptureRx = true,
+            CaptureTx = false,
+            Format = SerialTrafficLogFormat.Text,
+            BaudRate = 230400,
+            Dtr = SerialControlLinePolicy.High,
+            Rts = SerialControlLinePolicy.Low,
+            DirectoryPath = temp.Path,
+            MaxFileSizeMb = 1,
+            MaxFiles = 2
+        }
+    };
+
+    await manager.SyncAsync([mapping]);
+    AssertTrue(
+        SpinWait.SpinUntil(() => manager.GetStatus(mapping).Running, TimeSpan.FromSeconds(2)),
+        "Background log manager should open the COM without a UI process.");
+    serial.EnqueueRead("service-owned\r\n"u8.ToArray());
+    var path = manager.GetStatus(mapping).ActivePath;
+    AssertTrue(
+        SpinWait.SpinUntil(
+            () => File.Exists(path) && new FileInfo(path).Length > 0,
+            TimeSpan.FromSeconds(3)),
+        "Background service should write serial data to the configured TXT log.");
+    AssertTrue(factory.LastOpenWasExclusive, "Exclusive logging must request a non-shared COM handle.");
+    AssertEqual("230400", serial.GetSettings().BaudRate.ToString());
+    AssertTrue(serial.Dtr == true, "Configured DTR high policy should be applied by the service.");
+    AssertTrue(serial.Rts == false, "Configured RTS low policy should be applied by the service.");
+    await manager.SyncAsync([]);
+    AssertStringContains(File.ReadAllText(path), "service-owned");
+    AssertEqual(temp.Path, Path.GetDirectoryName(path) ?? "");
 }
 
 static void Com0comCreateHints()
@@ -3759,7 +4031,13 @@ static void CreateZip(string path, IReadOnlyDictionary<string, string> files)
 
 internal sealed class RecordingSerialPortEndpointFactory(RecordingSerialPortEndpoint endpoint) : ISerialPortEndpointFactory
 {
-    public ISerialPortEndpoint Open(string portName) => endpoint;
+    public bool LastOpenWasExclusive { get; private set; }
+
+    public ISerialPortEndpoint Open(string portName, bool exclusive = false)
+    {
+        LastOpenWasExclusive = exclusive;
+        return endpoint;
+    }
 }
 
 internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
@@ -3774,6 +4052,9 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
     private SerialPortSettings _settings = new(115200, 8, 0, 0);
     private SerialPeerSettingsInsertion _peerSettingsInsertion = SerialPeerSettingsInsertion.Unavailable();
     private bool _supportsModemStatusEvents;
+
+    public bool? Dtr { get; private set; }
+    public bool? Rts { get; private set; }
 
     public bool SupportsModemStatusEvents => _supportsModemStatusEvents;
 
@@ -3823,6 +4104,12 @@ internal sealed class RecordingSerialPortEndpoint : ISerialPortEndpoint
         {
             _settings = settings;
         }
+    }
+
+    public void SetControlLines(bool? dtr, bool? rts)
+    {
+        Dtr = dtr;
+        Rts = rts;
     }
 
     public void SetPeerSettingsInsertion(SerialPeerSettingsInsertion insertion)

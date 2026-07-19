@@ -197,7 +197,8 @@ public sealed class TunnelOrchestrator
             || !string.Equals(previous.BackingPort ?? "", current.BackingPort ?? "", StringComparison.OrdinalIgnoreCase)
             || RequiresEndpointRestartForConfigChange(previous, current)
             || previous.WirelessSerialAutoDiscover != current.WirelessSerialAutoDiscover
-            || !string.Equals(previous.WirelessSerialMac ?? "", current.WirelessSerialMac ?? "", StringComparison.OrdinalIgnoreCase);
+            || !string.Equals(previous.WirelessSerialMac ?? "", current.WirelessSerialMac ?? "", StringComparison.OrdinalIgnoreCase)
+            || previous.TrafficLog != current.TrafficLog;
     }
 
     private static bool RequiresEndpointRestartForConfigChange(TunnelMapping previous, TunnelMapping current)

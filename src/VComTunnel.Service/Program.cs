@@ -43,6 +43,7 @@ internal static class VComTunnelHost
                 periodicQueryEnabled: token => HasWirelessSerialMacBoundMappingAsync(store, token));
         });
         builder.Services.AddSingleton<TunnelOrchestrator>();
+        builder.Services.AddSingleton<SerialBackgroundLogManager>();
         builder.Services.AddHostedService<AutoStartHostedService>();
         builder.Services.AddHostedService<WirelessSerialEndpointHostedService>();
         builder.Services.ConfigureHttpJsonOptions(options =>
@@ -74,7 +75,8 @@ internal static class VComTunnelHost
                     programDataRoot = AppPaths.ProgramDataRoot,
                     toolsDirectory = AppPaths.ToolsDirectory,
                     configPath = AppPaths.ConfigPath,
-                    logsDirectory = AppPaths.LogsDirectory
+                    logsDirectory = AppPaths.LogsDirectory,
+                    serialTrafficLogsDirectory = AppPaths.SerialTrafficLogsDirectory
                 },
                 environment = new
                 {
@@ -121,15 +123,31 @@ internal static class VComTunnelHost
             return Results.Ok(config.Mappings);
         });
 
+        app.MapGet("/api/traffic-logs", async (
+            TunnelOrchestrator tunnels,
+            SerialBackgroundLogManager backgroundLogs,
+            CancellationToken requestToken) =>
+        {
+            var config = await tunnels.GetConfigAsync(requestToken);
+            var statuses = tunnels.GetStatus().Tunnels.ToDictionary(status => status.Id, StringComparer.OrdinalIgnoreCase);
+            return Results.Ok(config.Mappings.Select(mapping =>
+                backgroundLogs.GetStatus(mapping, statuses.GetValueOrDefault(mapping.Id))));
+        });
+
         app.MapPut("/api/mappings", async (
             List<TunnelMapping> mappings,
             TunnelOrchestrator tunnels,
+            SerialBackgroundLogManager backgroundLogs,
             CancellationToken requestToken) =>
         {
             var errors = await tunnels.SaveConfigAsync(new VComTunnelConfig { Mappings = mappings }, requestToken);
-            return errors.Count == 0
-                ? Results.Ok(new { saved = mappings.Count })
-                : Results.BadRequest(new { errors });
+            if (errors.Count > 0)
+            {
+                return Results.BadRequest(new { errors });
+            }
+
+            await backgroundLogs.SyncAsync(mappings, requestToken);
+            return Results.Ok(new { saved = mappings.Count });
         });
 
         app.MapPost("/api/mappings/{id}/start", async (
@@ -382,11 +400,16 @@ internal sealed class VComTunnelWindowsService : ServiceBase
 internal sealed class AutoStartHostedService : BackgroundService
 {
     private readonly TunnelOrchestrator _tunnels;
+    private readonly SerialBackgroundLogManager _backgroundLogs;
     private readonly InMemoryLog _log;
 
-    public AutoStartHostedService(TunnelOrchestrator tunnels, InMemoryLog log)
+    public AutoStartHostedService(
+        TunnelOrchestrator tunnels,
+        SerialBackgroundLogManager backgroundLogs,
+        InMemoryLog log)
     {
         _tunnels = tunnels;
+        _backgroundLogs = backgroundLogs;
         _log = log;
     }
 
@@ -395,14 +418,32 @@ internal sealed class AutoStartHostedService : BackgroundService
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
-            await _tunnels.StartAutoStartMappingsAsync(stoppingToken);
+            try
+            {
+                await _tunnels.StartAutoStartMappingsAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _log.Error("service", $"AutoStart mapping startup failed: {ex.Message}");
+            }
+
+            try
+            {
+                var config = await _tunnels.GetConfigAsync(stoppingToken);
+                await _backgroundLogs.SyncAsync(config.Mappings, stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _log.Error("service", $"Background logging restore failed: {ex.Message}");
+            }
+            await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
         }
         catch (OperationCanceledException)
         {
         }
-        catch (Exception ex)
+        finally
         {
-            _log.Error("service", $"AutoStart failed: {ex.Message}");
+            await _backgroundLogs.DisposeAsync();
         }
     }
 }
